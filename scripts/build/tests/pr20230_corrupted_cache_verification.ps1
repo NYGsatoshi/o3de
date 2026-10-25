@@ -167,3 +167,6 @@ function Invoke-RealExtraction([string]$workspace, [string]$sourceArchive, [bool
 Invoke-RealExtraction (Join-Path $root 'healthy-workspace') $goodArchive $true
 Invoke-RealExtraction (Join-Path $root 'corrupt-workspace') $badArchive $false
 Write-Host 'PASS: actual Windows CI cache restore regression suite'
+# An expected native 7-Zip error leaves LASTEXITCODE=2. Force a clean status
+# only after every independent assertion has passed.
+exit 0
