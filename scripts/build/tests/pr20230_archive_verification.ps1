@@ -4,7 +4,11 @@
 # Runs on Windows; does not touch the O3DE build or project cache.
 
 [CmdletBinding()]
-param([ValidateRange(100, 20000)][int]$FileCount = 1024)
+param(
+    [ValidateRange(100, 20000)][int]$FileCount = 1024,
+    [string]$ExportDirectory,
+    [string]$VerifyTransportDirectory
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -69,6 +73,49 @@ function Assert-Same([string]$leftDir, [string]$rightDir) {
         }
     }
     Write-Host "PASS: $($left.Count) files restored with byte-identical content and paths"
+}
+
+# Verify the same TAR and source manifest after transfer via GitHub Actions Artifact.
+# This runs on an independent Windows runner, not on the producer's filesystem.
+if (-not [string]::IsNullOrWhiteSpace($VerifyTransportDirectory)) {
+    $bundle = [IO.Path]::GetFullPath($VerifyTransportDirectory)
+    $transportArchive = Join-Path $bundle 'cache.tar'
+    $manifestFile = Join-Path $bundle 'expected-manifest.txt'
+    if (-not [IO.File]::Exists((LongPath $transportArchive))) {
+        throw 'Transported cache.tar is missing'
+    }
+    if (-not [IO.File]::Exists((LongPath $manifestFile))) {
+        throw 'Independent pre-archive manifest is missing'
+    }
+    & $sevenZip t -ttar $transportArchive | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Transported TAR structure is invalid' }
+    [IO.Directory]::CreateDirectory((LongPath $restored)) | Out-Null
+    & $sevenZip x -ttar -y "-o$restored" $transportArchive | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Transported TAR extraction failed: $LASTEXITCODE" }
+
+    $expectedManifest = [IO.File]::ReadAllLines((LongPath $manifestFile), [Text.Encoding]::UTF8)
+    $actualManifest = @(Manifest $restored)
+    if ($expectedManifest.Length -eq 0 -or $expectedManifest.Length -ne $actualManifest.Count) {
+        throw "Transported file count mismatch: $($expectedManifest.Length) expected, $($actualManifest.Count) restored"
+    }
+    for ($j = 0; $j -lt $expectedManifest.Length; $j++) {
+        if (-not [string]::Equals($expectedManifest[$j], $actualManifest[$j], [StringComparison]::Ordinal)) {
+            throw "Transported path or SHA256 mismatch: $($expectedManifest[$j]) != $($actualManifest[$j])"
+        }
+    }
+    foreach ($relative in $paths) {
+        if (-not [IO.Directory]::Exists((LongPath (Join-Path $restored $relative)))) {
+            throw "Transported cache directory is missing: $relative"
+        }
+    }
+    $reference = [datetime]::new(2026, 1, 2, 3, 4, 5, [DateTimeKind]::Utc).AddTicks(1234567)
+    $restoredTime = [IO.File]::GetLastWriteTimeUtc((LongPath (Join-Path $restored '.ccache\precision.bin')))
+    $delta = [math]::Abs(($reference - $restoredTime).TotalSeconds)
+    Write-Host ("Transported TAR timestamp delta (s): {0:F7}" -f $delta)
+    if ($delta -gt 1.0) { throw 'Transported TAR timestamp loss exceeds one second' }
+    Write-Host "PASS: GitHub Artifact transport preserved $($actualManifest.Count) paths and SHA256 hashes"
+    Write-Host 'PASS: all four cache directories and timestamp fixture survived independent restoration'
+    return
 }
 
 foreach ($relative in $paths) {
@@ -160,6 +207,19 @@ if ($legacyExit -eq 0) {
 }
 else {
     Write-Warning "Legacy POSIX-TAR comparison unavailable, exit=$legacyExit"
+}
+if (-not [string]::IsNullOrWhiteSpace($ExportDirectory)) {
+    $exportRoot = [IO.Path]::GetFullPath($ExportDirectory)
+    [IO.Directory]::CreateDirectory((LongPath $exportRoot)) | Out-Null
+    [IO.File]::Copy((LongPath $archive), (LongPath (Join-Path $exportRoot 'cache.tar')), $true)
+    $expected = [string[]]@(Manifest $source)
+    if ($expected.Length -eq 0) { throw 'Cannot export an empty manifest' }
+    [IO.File]::WriteAllLines(
+        (LongPath (Join-Path $exportRoot 'expected-manifest.txt')),
+        $expected,
+        [Text.UTF8Encoding]::new($false)
+    )
+    Write-Host "PASS: exported TAR and independent $($expected.Length)-file manifest for cross-job verification"
 }
 Write-Host 'PASS: archive verification finished'
 Write-Host "Test directory (ephemeral): $root"
