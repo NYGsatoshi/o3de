@@ -13,6 +13,7 @@ param(
     [ValidateRange(60, 14400)][int]$AssetTimeoutSeconds = 5400,
     [switch]$PreflightOnly,
     [switch]$WarmRun,
+    [switch]$MaterialPipelineProbe,
     [switch]$KeepCache
 )
 
@@ -78,6 +79,9 @@ $report = [ordered]@{
     expected_probe_relative_path = 'pc/assets/pr20230_cache_probe.mp4'
     product_restored = $false
     sha256_matches = $false
+    material_pipeline_requested = [bool]$MaterialPipelineProbe
+    material_pipeline_restored = $null
+    material_pipeline_sha256_matches = $null
     batch_full_success = $false
     runs = @()
     diagnostics = @()
@@ -91,6 +95,8 @@ $reportPath = $null
 $probe = $null
 $sourceHash = $null
 $productPath = $null
+$materialPath = $null
+$materialHash = $null
 $runResults = [Collections.Generic.List[object]]::new()
 $exitStatus = 1
 $createdCase = $false
@@ -190,18 +196,47 @@ try {
         }
         Write-Host 'PASS: initial isolated project product SHA256 equals source'
 
+        if ($MaterialPipelineProbe) {
+            # The original poisoned cache affected Material Type Builder's
+            # intermediate AZSL outputs, not just simple copy-job products.
+            # Choose one actual generated AZSL file after the first AP scan.
+            $materialRoot = Join-Path $cache 'Intermediate Assets\materials\types'
+            if (-not [IO.Directory]::Exists($materialRoot)) {
+                throw "No Material Type Builder intermediate cache directory: $materialRoot"
+            }
+            $candidates = @(Get-ChildItem -LiteralPath $materialRoot -Filter '*.azsl' -Recurse -File -ErrorAction Stop | Sort-Object FullName)
+            if ($candidates.Count -eq 0) {
+                throw 'MaterialPipelineProbe requires an actual generated .azsl intermediate output; none were found'
+            }
+            $materialPath = $candidates[0].FullName
+            $materialHash = Get-Sha256 $materialPath
+            $report.material_pipeline_product = $materialPath
+            $report.material_pipeline_original_sha256 = $materialHash
+            Write-Host "Material Type Builder intermediate fixture: $materialPath"
+        }
+
         if ($WarmRun) {
             $warm = Invoke-IsolatedBatch -Attempt 2 -Exe $ap -Arguments $args -LogDirectory $logs -TimeoutSeconds $AssetTimeoutSeconds
             $runResults.Add($warm)
             if (-not [IO.File]::Exists($productPath) -or (Get-Sha256 $productPath) -cne $sourceHash) {
                 throw 'Warm-run cache integrity check failed'
             }
+            if ($MaterialPipelineProbe -and (-not [IO.File]::Exists($materialPath) -or (Get-Sha256 $materialPath) -cne $materialHash)) {
+                throw 'Material Type Builder intermediate cache changed or disappeared on warm scan'
+            }
             Write-Host 'PASS: unchanged asset remains correct on warm scan'
         }
         $recoveryAttempt = if ($WarmRun) { 3 } else { 2 }
         Remove-Item -LiteralPath $productPath -Force -ErrorAction Stop
         if ([IO.File]::Exists($productPath)) { throw 'Could not delete the isolated product fixture' }
-        Write-Host 'Injected fault: removed only the synthetic cache product'
+        if ($MaterialPipelineProbe) {
+            Remove-Item -LiteralPath $materialPath -Force -ErrorAction Stop
+            if ([IO.File]::Exists($materialPath)) { throw 'Could not remove the isolated AZSL intermediate' }
+            Write-Host 'Injected fault: removed both synthetic copy-job product and one actual Material Type Builder AZSL'
+        }
+        else {
+            Write-Host 'Injected fault: removed only the synthetic cache product'
+        }
         $recovery = Invoke-IsolatedBatch -Attempt $recoveryAttempt -Exe $ap -Arguments $args -LogDirectory $logs -TimeoutSeconds $AssetTimeoutSeconds
         $runResults.Add($recovery)
 
@@ -213,6 +248,15 @@ try {
         if (-not $restored) { throw 'Isolated missing product was NOT regenerated' }
         if (-not $matching) { throw 'Regenerated product SHA256 does not match source' }
         Write-Host 'PASS: deleted isolated product regenerated with matching SHA256'
+        if ($MaterialPipelineProbe) {
+            $materialRestored = [IO.File]::Exists($materialPath)
+            $materialMatching = $materialRestored -and ((Get-Sha256 $materialPath) -ceq $materialHash)
+            $report.material_pipeline_restored = [bool]$materialRestored
+            $report.material_pipeline_sha256_matches = [bool]$materialMatching
+            if (-not $materialRestored) { throw 'Material Type Builder AZSL intermediate was NOT regenerated' }
+            if (-not $materialMatching) { throw 'Regenerated AZSL intermediate SHA256 mismatch' }
+            Write-Host 'PASS: missing Material Type Builder AZSL intermediate regenerated with matching SHA256'
+        }
 
         if ($report.batch_full_success) {
             $report.status = 'PASS'
