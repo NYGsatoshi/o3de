@@ -120,3 +120,26 @@ jobs:
         shell: pwsh
         run: |
           & .\scripts\build\tests\pr20230_corrupted_cache_verification.ps1
+
+  asset-processor-preflight:
+    name: AssetProcessor Local Recovery Harness / Preflight
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - name: Checkout local recovery harness
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          lfs: false
+      - name: Validate PowerShell syntax and short-path fixture
+        shell: pwsh
+        run: |
+          $file = (Resolve-Path '.\scripts\build\tests\pr20230_asset_processor_recovery.ps1').Path
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -ne 0) {
+            throw "AssetProcessor harness has $($parseErrors.Count) PowerShell parser errors"
+          }
+          & $file -PreflightOnly -EngineSource (Get-Location).Path -WorkRoot (Join-Path $env:RUNNER_TEMP 'p30')
+          if ($LASTEXITCODE -ne 0) { throw "Recovery preflight failed: $LASTEXITCODE" }
