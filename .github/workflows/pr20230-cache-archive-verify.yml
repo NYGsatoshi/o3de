@@ -105,3 +105,18 @@ jobs:
         shell: pwsh
         run: |
           & .\scripts\build\tests\pr20230_archive_verification.ps1 -VerifyTransportDirectory (Join-Path (Get-Location) 'pr20230-archive-bundle')
+
+  corrupt-archive-recovery:
+    name: Corrupted TAR / Real Production Restore Step
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - name: Checkout real Windows extraction step and regression script
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          lfs: false
+      - name: Test healthy extraction and truncated TAR cleanup
+        shell: pwsh
+        run: |
+          & .\scripts\build\tests\pr20230_corrupted_cache_verification.ps1
