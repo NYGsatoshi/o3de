@@ -128,7 +128,9 @@ foreach ($relative in $paths) {
     }
 }
 Write-Host 'PASS: exact Unicode filenames restored'
-if (-not [IO.File]::Exists((LongPath (Join-Path $restored '.ccache\' + ($longFile.Substring((Join-Path $source '.ccache').Length).TrimStart('\')))))) {
+$longRelative = $longFile.Substring($source.Length).TrimStart('\')
+$longRestored = Join-Path $restored $longRelative
+if (-not [IO.File]::Exists((LongPath $longRestored))) {
     throw 'Long path did not survive restoration'
 }
 Write-Host 'PASS: long path survived TAR round trip'
