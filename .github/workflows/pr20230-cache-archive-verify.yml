@@ -1,0 +1,79 @@
+# Copyright (c) Contributors to the Open 3D Engine Project.
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Isolated PR #20230 verification. Never runs on upstream PR branch.
+name: PR20230 Windows Cache TAR Verification
+
+on:
+  push:
+    branches:
+      - test/pr20230-cache-archive-20261025
+
+permissions:
+  contents: read
+
+jobs:
+  roundtrip:
+    name: Long Path / Unicode / File Hash / TAR Timestamp
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Checkout isolated verification branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          lfs: false
+      - name: Execute standalone archive verification
+        shell: pwsh
+        run: |
+          & .\scripts\build\tests\pr20230_archive_verification.ps1 -FileCount 1024
+
+  compression-failure:
+    name: Compression Failure Must Not Upload
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - name: Create test cache
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force '.ccache' | Out-Null
+          [IO.File]::WriteAllText((Join-Path (Get-Location) '.ccache\sample.txt'), 'This should never be uploaded')
+
+      - name: Inject a genuine 7-Zip archive write failure
+        id: compress
+        continue-on-error: true # Test harness only; production compression has no continue-on-error.
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+          if (-not (Test-Path -LiteralPath $sevenZip -PathType Leaf)) {
+            throw '7-Zip is unavailable'
+          }
+          $blocker = Join-Path $env:RUNNER_TEMP 'pr20230-blocker-file'
+          [IO.File]::WriteAllText($blocker, 'A file, not a directory')
+          $archive = Join-Path $blocker 'cache.tar'
+          & $sevenZip a -ttar -y $archive '.ccache'
+          $code = $LASTEXITCODE
+          if ($code -eq 0) { throw 'Invalid fixture: 7-Zip unexpectedly returned success' }
+          Write-Host "Expected 7-Zip write failure; exit code: $code"
+          exit $code
+
+      - name: Guarded upload - must be skipped
+        id: upload
+        if: ${{ steps.compress.outcome }} == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: PR20230-SHOULD-NOT-EXIST
+          path: .ccache
+          if-no-files-found: error
+
+      - name: Verify failure outcome and upload suppression
+        if: always()
+        shell: pwsh
+        run: |
+          if ('${{ steps.compress.outcome }}' -ne 'failure') {
+            throw 'Compression step did not report failure'
+          }
+          if ('${{ steps.upload.outcome }}' -ne 'skipped') {
+            throw 'Guarded upload step was not skipped'
+          }
+          Write-Host 'PASS: 7-Zip failure recorded; guarded artifact upload skipped'
