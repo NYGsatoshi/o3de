@@ -224,7 +224,7 @@ function Test-ProductionCompression([string]$workspace) {
     try {
         Push-Location $workspace
         try {
-            & pwsh -NoLogo -NoProfile -NonInteractive -File $compressScript
+            & pwsh -NoLogo -NoProfile -NonInteractive -File $compressScript | ForEach-Object { Write-Host $_ }
             $rc = $LASTEXITCODE
         }
         finally { Pop-Location }
