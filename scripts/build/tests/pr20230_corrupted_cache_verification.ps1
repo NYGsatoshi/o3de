@@ -169,4 +169,96 @@ Invoke-RealExtraction (Join-Path $root 'corrupt-workspace') $badArchive $false
 Write-Host 'PASS: actual Windows CI cache restore regression suite'
 # An expected native 7-Zip error leaves LASTEXITCODE=2. Force a clean status
 # only after every independent assertion has passed.
+# Validate production compression with the same approach as extraction:
+# run its real script block from windows-build.yml in a child pwsh process,
+# substituting only the known successful Build step outcome.
+$compressMarkers = @(
+    for ($i = 0; $i -lt $lines.Length; $i++) {
+        if ($lines[$i] -eq '      - name: Compress artifacts') { $i }
+    }
+)
+if ($compressMarkers.Count -ne 1) { throw 'Production compression step not uniquely found' }
+$compressStart = $compressMarkers[0]
+$compressEnd = $lines.Length
+for ($i = $compressStart + 1; $i -lt $lines.Length; $i++) {
+    if ($lines[$i] -match '^      - name: ') { $compressEnd = $i; break }
+}
+$compressSection = [string]::Join([Environment]::NewLine, $lines[$compressStart..($compressEnd - 1)])
+if ($compressSection.Contains('continue-on-error: true')) { throw 'Production compression hides failures' }
+$saveLine = -1
+for ($i = $compressEnd; $i -lt $lines.Length; $i++) {
+    if ($lines[$i] -eq '      - name: Save artifacts') { $saveLine = $i; break }
+}
+if ($saveLine -lt 0 -or -not ([string]::Join([Environment]::NewLine, $lines[$saveLine..([Math]::Min($saveLine + 13, $lines.Length - 1))])).Contains("steps.compress-artifacts.outcome == 'success'")) {
+    throw 'Production artifact upload gate does not check the actual compression outcome'
+}
+$compressRunLine = -1
+for ($i = $compressStart + 1; $i -lt $compressEnd; $i++) {
+    if ($lines[$i] -eq '        run: |') { $compressRunLine = $i; break }
+}
+if ($compressRunLine -lt 0) { throw 'No production compression run block' }
+$compressLines = [Collections.Generic.List[string]]::new()
+for ($i = $compressRunLine + 1; $i -lt $compressEnd; $i++) {
+    if ($lines[$i].StartsWith('          ')) { $compressLines.Add($lines[$i].Substring(10)) }
+    elseif ($lines[$i].Trim().Length -eq 0) { $compressLines.Add('') }
+    else { throw "Unexpected compression YAML indentation, line $($i + 1)" }
+}
+$compressBody = [string]::Join([Environment]::NewLine, $compressLines)
+$buildToken = '$' + '{{ steps.build.outcome }}'
+if ($compressBody.Split([string[]]@($buildToken), [StringSplitOptions]::None).Length -ne 2) {
+    throw 'Expected a single GitHub Actions build-status expression'
+}
+$compressBody = $compressBody.Replace($buildToken, 'success')
+foreach ($required in @('7-Zip\7z.exe', ' a -ttar ', 'AutomatedTesting\Cache', 'exit 1')) {
+    if (-not $compressBody.Contains($required)) { throw "Production compression changed: $required" }
+}
+$compressScript = Join-Path $root 'production-compression.ps1'
+[IO.File]::WriteAllText($compressScript, $compressBody, [Text.UTF8Encoding]::new($false))
+function Test-ProductionCompression([string]$workspace) {
+    [IO.Directory]::CreateDirectory($workspace) | Out-Null
+    foreach ($relative in $cachePaths) {
+        Put-File (Join-Path (Join-Path $workspace $relative) 'fixture.txt') "cache directory $relative"
+    }
+    $old = [Environment]::GetEnvironmentVariable('DEV_DRIVE_WORKSPACE')
+    $env:DEV_DRIVE_WORKSPACE = $workspace
+    try {
+        Push-Location $workspace
+        try {
+            & pwsh -NoLogo -NoProfile -NonInteractive -File $compressScript
+            $rc = $LASTEXITCODE
+        }
+        finally { Pop-Location }
+    }
+    finally { [Environment]::SetEnvironmentVariable('DEV_DRIVE_WORKSPACE', $old) }
+    return $rc
+}
+$compressGood = Join-Path $root 'compression-good'
+$goodCode = Test-ProductionCompression $compressGood
+if ($goodCode -ne 0) { throw "Production compressor failed on valid cache, exit=$goodCode" }
+$goodOutput = Join-Path $compressGood 'cache.tar'
+if (-not [IO.File]::Exists($goodOutput) -or ([IO.FileInfo]$goodOutput).Length -le 0) {
+    throw 'Production compression did not write a nonempty cache.tar'
+}
+& $sevenZip t -ttar $goodOutput | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Production compressor emitted invalid TAR' }
+$verifyGood = Join-Path $root 'compression-verified'
+[IO.Directory]::CreateDirectory($verifyGood) | Out-Null
+& $sevenZip x -ttar -y "-o$verifyGood" $goodOutput | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Production TAR extraction failed' }
+foreach ($relative in $cachePaths) {
+    $fixture = Join-Path (Join-Path $verifyGood $relative) 'fixture.txt'
+    if (-not [IO.File]::Exists($fixture) -or [IO.File]::ReadAllText($fixture) -cne "cache directory $relative") {
+        throw "Production compressed archive lost file in $relative"
+    }
+}
+Write-Host 'PASS: actual production compressor preserves all four cache roots'
+$compressBad = Join-Path $root 'compression-blocked'
+[IO.Directory]::CreateDirectory($compressBad) | Out-Null
+$blockedOutput = Join-Path $compressBad 'cache.tar'
+Put-File (Join-Path $blockedOutput 'blocker.txt') 'nonempty directory'
+$badCode = Test-ProductionCompression $compressBad
+if ($badCode -eq 0) { throw 'Production compression incorrectly succeeded on blocked TAR output path' }
+if (-not [IO.Directory]::Exists($blockedOutput)) { throw 'Compression failure fixture was unexpectedly removed' }
+Write-Host "PASS: production compression returned nonzero on blocked TAR output, exit=$badCode"
+Write-Host 'PASS: production upload is guarded by the real compression outcome'
 exit 0
