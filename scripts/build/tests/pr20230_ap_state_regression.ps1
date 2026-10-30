@@ -37,6 +37,7 @@ $matrix = @(
     [pscustomobject]@{ name='success'; mode='pass'; expected='PASS'; code=0; runs=2; warm=$false; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
     [pscustomobject]@{ name='partial'; mode='nonzero-but-restored'; expected='PARTIAL'; code=2; runs=2; warm=$false; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
     [pscustomobject]@{ name='timestamp-success'; mode='pass'; expected='PASS'; code=0; runs=4; warm=$true; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
+    [pscustomobject]@{ name='timestamp-baseline'; mode='pass'; expected='PASS'; code=0; runs=5; warm=$true; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
     [pscustomobject]@{ name='timestamp-corrupt'; mode='timestamp-corrupt'; expected='FAIL'; code=1; runs=3; warm=$true; material=$false; hash=$false; materialHash=$null; errorPattern='Timestamp probe product SHA256 mismatch' },
     [pscustomobject]@{ name='timestamp-partial'; mode='timestamp-nonzero'; expected='PARTIAL'; code=2; runs=4; warm=$true; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
     [pscustomobject]@{ name='baseline-contrast'; mode='pass'; expected='PASS'; code=0; runs=3; warm=$false; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
@@ -65,7 +66,7 @@ try {
         }
         if ($case.warm) { $parameters['WarmRun'] = $true }
         if ($case.name -like 'timestamp-*') { $parameters['TimestampTruncationProbe'] = $true }
-        if ($case.name -like 'baseline-*') { $parameters['CompareZeroAnalysisBaseline'] = $true }
+        if ($case.name -like 'baseline-*' -or $case.name -eq 'timestamp-baseline') { $parameters['CompareZeroAnalysisBaseline'] = $true }
         if ($case.material) { $parameters['MaterialPipelineProbe'] = $true }
         if ($case.name -eq 'success') { $parameters['MaxJobs'] = 2 }
         if ($case.name -eq 'timeout') { $parameters['AssetTimeoutSeconds'] = 1 }
@@ -115,6 +116,13 @@ try {
             }
             elseif (-not $report.timestamp_probe_product_sha256_matches) {
                 throw "[$($case.name)] stable product hash was not reported"
+            }
+            if ($case.name -eq 'timestamp-baseline' -and
+                (-not $report.zero_analysis_comparison_distinguishes -or $report.zero_analysis_baseline_exit_code -ne 0)) {
+                throw '[timestamp-baseline] combined timestamp and zero-analysis control was not exercised'
+            }
+            if ($null -ne $report.timestamp_probe_post_scan_counters -or $null -ne $report.timestamp_probe_warm_scan_counters) {
+                throw "[$($case.name)] fake AP should report unknown, not invented asset-scan counters"
             }
             if ($case.name -eq 'timestamp-partial' -and ($report.timestamp_probe_post_exit_code -ne 7 -or $report.batch_full_success)) {
                 throw '[timestamp-partial] nonzero timestamp scan was counted as success'
