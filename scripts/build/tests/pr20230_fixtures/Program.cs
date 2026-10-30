@@ -25,11 +25,7 @@ static class FakeAssetProcessor
     {
         try
         {
-            if (args.Any(x => x.Contains("zeroAnalysisMode", StringComparison.OrdinalIgnoreCase)))
-            {
-                Console.Error.WriteLine("zeroAnalysisMode must be disabled");
-                return 15;
-            }
+            bool zeroAnalysis = args.Any(x => x.Contains("zeroAnalysisMode", StringComparison.OrdinalIgnoreCase));
 
             string project = GetArg(args, "project-path");
             string cache = GetArg(args, "project-cache-path");
@@ -50,7 +46,8 @@ static class FakeAssetProcessor
             }
 
             if (!(mode == "initial-product-missing" && run == 1) &&
-                !(mode == "missing-copy" && run >= 2))
+                !(mode == "missing-copy" && run >= 2) &&
+                !(zeroAnalysis && mode != "baseline-regenerates"))
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                 File.Copy(source, target, true);
@@ -69,7 +66,7 @@ static class FakeAssetProcessor
                 File.WriteAllText(material, payload, Encoding.UTF8);
             }
 
-            Console.WriteLine($"FakeAP run={run} mode={mode} product={File.Exists(target)} material={File.Exists(material)}");
+            Console.WriteLine($"FakeAP run={run} mode={mode} zeroAnalysis={zeroAnalysis} product={File.Exists(target)} material={File.Exists(material)}");
             if (mode == "nonzero-but-restored")
             {
                 Console.Error.WriteLine("Injected unrelated AssetProcessor job failure");

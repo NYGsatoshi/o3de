@@ -36,6 +36,8 @@ Write-Host 'PASS: compiled isolated, framework-dependent fake AssetProcessorBatc
 $matrix = @(
     [pscustomobject]@{ name='success'; mode='pass'; expected='PASS'; code=0; runs=2; warm=$false; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
     [pscustomobject]@{ name='partial'; mode='nonzero-but-restored'; expected='PARTIAL'; code=2; runs=2; warm=$false; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
+    [pscustomobject]@{ name='baseline-contrast'; mode='pass'; expected='PASS'; code=0; runs=3; warm=$false; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
+    [pscustomobject]@{ name='baseline-inconclusive'; mode='baseline-regenerates'; expected='INCONCLUSIVE'; code=3; runs=3; warm=$false; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
     [pscustomobject]@{ name='missing-copy'; mode='missing-copy'; expected='FAIL'; code=1; runs=2; warm=$false; material=$false; hash=$false; materialHash=$null; errorPattern='NOT regenerated' },
     [pscustomobject]@{ name='bad-copy'; mode='bad-copy'; expected='FAIL'; code=1; runs=2; warm=$false; material=$false; hash=$false; materialHash=$null; errorPattern='SHA256 does not match' },
     [pscustomobject]@{ name='initial-missing'; mode='initial-product-missing'; expected='FAIL'; code=1; runs=1; warm=$false; material=$false; hash=$false; materialHash=$null; errorPattern='Initial copy-job product missing' },
@@ -59,6 +61,7 @@ try {
             AssetTimeoutSeconds = 120
         }
         if ($case.warm) { $parameters['WarmRun'] = $true }
+        if ($case.name -like 'baseline-*') { $parameters['CompareZeroAnalysisBaseline'] = $true }
         if ($case.material) { $parameters['MaterialPipelineProbe'] = $true }
         if ($case.name -eq 'success') { $parameters['MaxJobs'] = 2 }
         if ($case.name -eq 'timeout') { $parameters['AssetTimeoutSeconds'] = 1 }
@@ -94,6 +97,18 @@ try {
         if ($case.errorPattern -and [string]$report.error -notmatch $case.errorPattern) {
             throw "[$($case.name)] unexpected failure diagnostic: $($report.error)"
         }
+        if ($case.name -like 'baseline-*') {
+            $shouldDistinguish = ($case.name -eq 'baseline-contrast')
+            if ([bool]$report.zero_analysis_comparison_distinguishes -ne $shouldDistinguish) {
+                throw "[$($case.name)] incorrect zeroAnalysisMode baseline contrast"
+            }
+            if (@($report.zero_analysis_baseline_arguments | Where-Object { $_ -eq '--zeroAnalysisMode' }).Count -ne 1 -or $report.zero_analysis_baseline_exit_code -ne 0) {
+                throw "[$($case.name)] zeroAnalysisMode was not executed exactly once with exit code 0"
+            }
+            if ([bool]$report.zero_analysis_baseline_restored -eq $shouldDistinguish) {
+                throw "[$($case.name)] unexpected baseline cache product state"
+            }
+        }
         if ($case.name -eq 'success') {
             if ($report.max_jobs_override -ne 2 -or @($report.arguments | Where-Object { $_ -match 'maxJobs=2' }).Count -ne 1) {
                 throw '[success] maxJobs override did not reach the AssetProcessor command line'
@@ -111,5 +126,5 @@ try {
 finally {
     [Environment]::SetEnvironmentVariable('PR20230_FAKE_AP_MODE', $oldMode)
 }
-Write-Host "PASS: $($matrix.Count) AssetProcessor harness state-machine cases (including timeout and engine revision mismatch)"
+Write-Host "PASS: $($matrix.Count) AssetProcessor harness state-machine cases (including baseline contrast, timeout, and engine revision mismatch)"
 exit 0

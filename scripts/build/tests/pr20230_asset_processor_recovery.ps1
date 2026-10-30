@@ -13,6 +13,7 @@ param(
     [ValidateRange(1, 14400)][int]$AssetTimeoutSeconds = 5400,
     [string]$ExpectedEngineCommit = '',
     [ValidateRange(0, 64)][int]$MaxJobs = 0,
+    [switch]$CompareZeroAnalysisBaseline,
     [switch]$PreflightOnly,
     [switch]$WarmRun,
     [switch]$MaterialPipelineProbe,
@@ -82,6 +83,12 @@ $report = [ordered]@{
     engine_git_head = $null
     expected_engine_commit = $ExpectedEngineCommit
     max_jobs_override = $MaxJobs
+    zero_analysis_comparison_requested = [bool]$CompareZeroAnalysisBaseline
+    zero_analysis_baseline_arguments = $null
+    zero_analysis_baseline_exit_code = $null
+    zero_analysis_baseline_restored = $null
+    zero_analysis_baseline_sha256_matches = $null
+    zero_analysis_comparison_distinguishes = $null
     asset_processor_binary_sha256 = $null
     asset_processor_binary_last_write_utc = $null
     build_root = $BuildRoot
@@ -299,10 +306,43 @@ try {
             Write-Host 'PASS: missing Material Type Builder AZSL intermediate regenerated with matching SHA256'
         }
 
+
+        # Negative control: remove the successfully recovered isolated product
+        # again, then scan exactly the same project/cache with zeroAnalysisMode.
+        # Do not treat a nonzero baseline process as evidence for the flag:
+        # an unrelated failure could also prevent regeneration.
+        if ($CompareZeroAnalysisBaseline) {
+            Remove-Item -LiteralPath $productPath -Force -ErrorAction Stop
+            if ([IO.File]::Exists($productPath)) { throw 'Could not inject baseline missing-product fault' }
+            $baselineArgs = @($args) + @('--zeroAnalysisMode')
+            $report.zero_analysis_baseline_arguments = $baselineArgs
+            $baseline = Invoke-IsolatedBatch -Attempt ($recoveryAttempt + 1) -Exe $ap -Arguments $baselineArgs -LogDirectory $logs -TimeoutSeconds $AssetTimeoutSeconds
+            $runResults.Add($baseline)
+            if ($baseline.timed_out) { throw "zeroAnalysisMode baseline timed out after $AssetTimeoutSeconds seconds" }
+            $baselineRestored = [IO.File]::Exists($productPath)
+            $baselineHashMatches = $baselineRestored -and ((Get-Sha256 $productPath) -ceq $sourceHash)
+            $report.zero_analysis_baseline_exit_code = $baseline.exit_code
+            $report.zero_analysis_baseline_restored = [bool]$baselineRestored
+            $report.zero_analysis_baseline_sha256_matches = if ($baselineRestored) { [bool]$baselineHashMatches } else { $null }
+            $report.zero_analysis_comparison_distinguishes = [bool](($baseline.exit_code -eq 0) -and -not $baselineRestored)
+            if ($baselineRestored -and -not $baselineHashMatches) {
+                throw 'zeroAnalysisMode baseline generated a product with mismatching SHA256'
+            }
+            Write-Host ("Baseline zeroAnalysisMode: exit={0}, product regenerated={1}, distinguishes={2}" -f $baseline.exit_code, $baselineRestored, $report.zero_analysis_comparison_distinguishes)
+        }
+
         if ($report.batch_full_success) {
-            $report.status = 'PASS'
-            $exitStatus = 0
-            Write-Host 'PASS: all AssetProcessorBatch invocations exited 0'
+            if ($CompareZeroAnalysisBaseline -and -not $report.zero_analysis_comparison_distinguishes) {
+                $report.status = 'INCONCLUSIVE'
+                $exitStatus = 3
+                Write-Warning 'Real recovery succeeded, but zeroAnalysisMode baseline did not establish a clean negative control.'
+            }
+            else {
+                $report.status = 'PASS'
+                $exitStatus = 0
+                Write-Host 'PASS: all normal-analysis AssetProcessorBatch invocations exited 0'
+                if ($CompareZeroAnalysisBaseline) { Write-Host 'PASS: the successful zeroAnalysisMode baseline did not regenerate the removed product' }
+            }
         }
         else {
             $report.status = 'PARTIAL'
