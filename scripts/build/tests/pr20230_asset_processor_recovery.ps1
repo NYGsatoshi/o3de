@@ -10,7 +10,8 @@ param(
     [string]$EngineSource = (Join-Path $HOME 'o3de-src'),
     [string]$BuildRoot = (Join-Path $HOME 'o3de-build'),
     [string]$WorkRoot = (Join-Path $HOME 'p30'),
-    [ValidateRange(60, 14400)][int]$AssetTimeoutSeconds = 5400,
+    [ValidateRange(1, 14400)][int]$AssetTimeoutSeconds = 5400,
+    [string]$ExpectedEngineCommit = '',
     [switch]$PreflightOnly,
     [switch]$WarmRun,
     [switch]$MaterialPipelineProbe,
@@ -45,15 +46,17 @@ function Invoke-IsolatedBatch([int]$Attempt, [string]$Exe, [string[]]$Arguments,
     $err = Join-Path $LogDirectory ('ap-{0}-stderr.txt' -f $Attempt)
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     $process = Start-Process -FilePath $Exe -ArgumentList $Arguments -WorkingDirectory (Split-Path -Parent $Exe) -RedirectStandardOutput $out -RedirectStandardError $err -NoNewWindow -PassThru -ErrorAction Stop
+    $timedOut = $false
     try {
-        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-            # Only terminate the child process started by this harness.
+        $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut) {
+            # Only terminate the process tree started by this harness.
             & taskkill.exe /PID $process.Id /T /F | Out-Null
-            throw "AssetProcessorBatch timed out on attempt $Attempt after $TimeoutSeconds seconds"
+            if (-not $process.WaitForExit(10000)) { throw "Failed to stop timed-out AssetProcessorBatch process $($process.Id)" }
         }
-        $process.WaitForExit()
+        else { $process.WaitForExit() }
         $process.Refresh()
-        $code = [int]$process.ExitCode
+        $code = if ($timedOut) { 124 } else { [int]$process.ExitCode }
     }
     finally {
         $stopwatch.Stop()
@@ -63,6 +66,7 @@ function Invoke-IsolatedBatch([int]$Attempt, [string]$Exe, [string[]]$Arguments,
     return [pscustomobject]@{
         attempt = $Attempt
         exit_code = $code
+        timed_out = [bool]$timedOut
         elapsed_seconds = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)
         stdout = $out
         stderr = $err
@@ -74,6 +78,10 @@ $report = [ordered]@{
     generated_utc = [DateTime]::UtcNow.ToString('o')
     status = 'NOT_STARTED'
     engine_source = $EngineSource
+    engine_git_head = $null
+    expected_engine_commit = $ExpectedEngineCommit
+    asset_processor_binary_sha256 = $null
+    asset_processor_binary_last_write_utc = $null
     build_root = $BuildRoot
     work_root = $WorkRoot
     expected_probe_relative_path = 'pc/assets/pr20230_cache_probe.mp4'
@@ -108,6 +116,23 @@ try {
     $WorkRoot = [IO.Path]::GetFullPath($WorkRoot).TrimEnd('\')
     if (-not [IO.File]::Exists((Join-Path $EngineSource 'engine.json'))) {
         throw "O3DE engine.json not found: $EngineSource"
+    }
+    # The source revision is recorded alongside binary provenance. If a SHA
+    # is supplied, reject a build checkout from an unintended PR revision.
+    $gitExecutable = Get-Command git -ErrorAction SilentlyContinue
+    if ($null -ne $gitExecutable) {
+        $rev = @(& git -C $EngineSource rev-parse --verify HEAD 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $rev.Count -eq 1 -and $rev[0] -match '^[0-9a-fA-F]{40}$') {
+            $report.engine_git_head = $rev[0]
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedEngineCommit)) {
+        if ($ExpectedEngineCommit -notmatch '^[0-9a-fA-F]{7,40}$') {
+            throw 'ExpectedEngineCommit must be a hexadecimal Git SHA prefix (7 to 40 characters)'
+        }
+        if (-not $report.engine_git_head -or -not $report.engine_git_head.StartsWith($ExpectedEngineCommit, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Engine revision mismatch: expected $ExpectedEngineCommit; actual $($report.engine_git_head)"
+        }
     }
     foreach ($forbidden in @($EngineSource, $BuildRoot)) {
         if ($WorkRoot.Equals($forbidden, [StringComparison]::OrdinalIgnoreCase) -or $WorkRoot.StartsWith(($forbidden + '\'), [StringComparison]::OrdinalIgnoreCase)) {
@@ -184,9 +209,14 @@ try {
     else {
         $ap = Join-Path $BuildRoot 'bin\profile\AssetProcessorBatch.exe'
         if (-not [IO.File]::Exists($ap)) { throw "AssetProcessorBatch.exe not found: $ap" }
+        $apInfo = [IO.FileInfo]::new($ap)
+        $report.asset_processor_binary_sha256 = Get-Sha256 $ap
+        $report.asset_processor_binary_last_write_utc = $apInfo.LastWriteTimeUtc.ToString('o')
+        Write-Host "AssetProcessor binary SHA256: $($report.asset_processor_binary_sha256)"
 
         $cold = Invoke-IsolatedBatch -Attempt 1 -Exe $ap -Arguments $args -LogDirectory $logs -TimeoutSeconds $AssetTimeoutSeconds
         $runResults.Add($cold)
+        if ($cold.timed_out) { throw "AssetProcessorBatch timed out on attempt 1 after $AssetTimeoutSeconds seconds" }
         if (-not [IO.File]::Exists($productPath)) {
             throw "Initial copy-job product missing: $productPath"
         }
@@ -218,6 +248,7 @@ try {
         if ($WarmRun) {
             $warm = Invoke-IsolatedBatch -Attempt 2 -Exe $ap -Arguments $args -LogDirectory $logs -TimeoutSeconds $AssetTimeoutSeconds
             $runResults.Add($warm)
+            if ($warm.timed_out) { throw "AssetProcessorBatch timed out on attempt 2 after $AssetTimeoutSeconds seconds" }
             if (-not [IO.File]::Exists($productPath) -or (Get-Sha256 $productPath) -cne $sourceHash) {
                 throw 'Warm-run cache integrity check failed'
             }
@@ -239,6 +270,7 @@ try {
         }
         $recovery = Invoke-IsolatedBatch -Attempt $recoveryAttempt -Exe $ap -Arguments $args -LogDirectory $logs -TimeoutSeconds $AssetTimeoutSeconds
         $runResults.Add($recovery)
+        if ($recovery.timed_out) { throw "AssetProcessorBatch timed out on attempt $recoveryAttempt after $AssetTimeoutSeconds seconds" }
 
         $restored = [IO.File]::Exists($productPath)
         $matching = $restored -and ((Get-Sha256 $productPath) -cne $sourceHash) -eq $false
