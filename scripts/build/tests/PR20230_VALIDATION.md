@@ -76,13 +76,13 @@ The current `assetUtils.cpp` code defaults `Fingerprinting/UseFileHashing` to tr
 
 - [AssetProcessor scan and skip logic](https://github.com/NYGsatoshi/o3de/blob/test/pr20230-cache-archive-20261025/Code/Tools/AssetProcessor/native/AssetManager/assetProcessorManager.cpp)
 - [Fingerprinting configuration and default](https://github.com/NYGsatoshi/o3de/blob/test/pr20230-cache-archive-20261025/Code/Tools/AssetProcessor/native/utilities/assetUtils.cpp)
-- [Fake-binary verification run 41058592680](https://github.com/NYGsatoshi/o3de/actions/runs/41058592680) — 6/6 jobs passed, including 15 simulated harness states (3 for the timestamp probe). No real engine build was executed by that workflow.
+- [Fake-binary verification run 41058988040](https://github.com/NYGsatoshi/o3de/actions/runs/41058988040) — 6/6 jobs passed, including **16 simulated harness states** (four for the timestamp probe, including a combined `-TimestampTruncationProbe` and `-CompareZeroAnalysisBaseline` run). No real engine build was executed by that workflow.
 
 ## Remaining proof
 
 1. Run real AssetProcessorBatch against an appropriately built PR revision and obtain `PASS`, or preserve the `PARTIAL`/`INCONCLUSIVE` report with logs for diagnosis.
 2. Reproduce Android missing-product recovery and compare behavior with and without `--zeroAnalysisMode`.
-3. Use the optional timestamp-only A/B probe against a real, matching AssetProcessor binary; correlate warm/post-truncation timings with actual job counts, and separately evaluate real TAR restore and incremental cache hits. A 15-case fake AP state matrix validates only the harness control flow.
+3. Use the optional timestamp-only A/B probe against a real, matching AssetProcessor binary; correlate warm/post-truncation timings with actual job counts, and separately evaluate real TAR restore and incremental cache hits. A 16-case fake AP state matrix validates only the harness control flow.
 4. Recheck upstream AR results after the unrelated/profile build failures are addressed; do not substitute historical success for current-head success.
 
 **Never promote fork-only simulation successes to actual engine/Android acceptance.**
