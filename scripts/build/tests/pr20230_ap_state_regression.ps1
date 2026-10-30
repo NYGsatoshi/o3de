@@ -36,6 +36,9 @@ Write-Host 'PASS: compiled isolated, framework-dependent fake AssetProcessorBatc
 $matrix = @(
     [pscustomobject]@{ name='success'; mode='pass'; expected='PASS'; code=0; runs=2; warm=$false; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
     [pscustomobject]@{ name='partial'; mode='nonzero-but-restored'; expected='PARTIAL'; code=2; runs=2; warm=$false; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
+    [pscustomobject]@{ name='timestamp-success'; mode='pass'; expected='PASS'; code=0; runs=4; warm=$true; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
+    [pscustomobject]@{ name='timestamp-corrupt'; mode='timestamp-corrupt'; expected='FAIL'; code=1; runs=3; warm=$true; material=$false; hash=$false; materialHash=$null; errorPattern='Timestamp probe product SHA256 mismatch' },
+    [pscustomobject]@{ name='timestamp-partial'; mode='timestamp-nonzero'; expected='PARTIAL'; code=2; runs=4; warm=$true; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
     [pscustomobject]@{ name='baseline-contrast'; mode='pass'; expected='PASS'; code=0; runs=3; warm=$false; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
     [pscustomobject]@{ name='baseline-inconclusive'; mode='baseline-regenerates'; expected='INCONCLUSIVE'; code=3; runs=3; warm=$false; material=$false; hash=$true; materialHash=$null; errorPattern=$null },
     [pscustomobject]@{ name='missing-copy'; mode='missing-copy'; expected='FAIL'; code=1; runs=2; warm=$false; material=$false; hash=$false; materialHash=$null; errorPattern='NOT regenerated' },
@@ -61,6 +64,7 @@ try {
             AssetTimeoutSeconds = 120
         }
         if ($case.warm) { $parameters['WarmRun'] = $true }
+        if ($case.name -like 'timestamp-*') { $parameters['TimestampTruncationProbe'] = $true }
         if ($case.name -like 'baseline-*') { $parameters['CompareZeroAnalysisBaseline'] = $true }
         if ($case.material) { $parameters['MaterialPipelineProbe'] = $true }
         if ($case.name -eq 'success') { $parameters['MaxJobs'] = 2 }
@@ -97,6 +101,25 @@ try {
         if ($case.errorPattern -and [string]$report.error -notmatch $case.errorPattern) {
             throw "[$($case.name)] unexpected failure diagnostic: $($report.error)"
         }
+        if ($case.name -like 'timestamp-*') {
+            if (-not $report.timestamp_probe_requested -or $report.timestamp_probe_files_changed -lt 1 -or
+                $report.timestamp_probe_files_seen -lt $report.timestamp_probe_files_changed) {
+                throw "[$($case.name)] missing or invalid timestamp-perturbation evidence"
+            }
+            if ($null -eq $report.timestamp_probe_post_truncation_seconds -or
+                $null -eq $report.timestamp_probe_normal_warm_seconds) {
+                throw "[$($case.name)] missing A/B elapsed time observations"
+            }
+            if ($case.name -eq 'timestamp-corrupt') {
+                if ($report.timestamp_probe_product_sha256_matches) { throw '[timestamp-corrupt] corruption was not detected' }
+            }
+            elseif (-not $report.timestamp_probe_product_sha256_matches) {
+                throw "[$($case.name)] stable product hash was not reported"
+            }
+            if ($case.name -eq 'timestamp-partial' -and ($report.timestamp_probe_post_exit_code -ne 7 -or $report.batch_full_success)) {
+                throw '[timestamp-partial] nonzero timestamp scan was counted as success'
+            }
+        }
         if ($case.name -like 'baseline-*') {
             $shouldDistinguish = ($case.name -eq 'baseline-contrast')
             if ([bool]$report.zero_analysis_comparison_distinguishes -ne $shouldDistinguish) {
@@ -126,5 +149,5 @@ try {
 finally {
     [Environment]::SetEnvironmentVariable('PR20230_FAKE_AP_MODE', $oldMode)
 }
-Write-Host "PASS: $($matrix.Count) AssetProcessor harness state-machine cases (including baseline contrast, timeout, and engine revision mismatch)"
+Write-Host "PASS: $($matrix.Count) AssetProcessor harness state-machine cases (including timestamp truncation, baseline contrast, timeout, and engine revision mismatch)"
 exit 0

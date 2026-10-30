@@ -14,6 +14,7 @@ param(
     [string]$ExpectedEngineCommit = '',
     [ValidateRange(0, 64)][int]$MaxJobs = 0,
     [switch]$CompareZeroAnalysisBaseline,
+    [switch]$TimestampTruncationProbe,
     [switch]$PreflightOnly,
     [switch]$WarmRun,
     [switch]$MaterialPipelineProbe,
@@ -41,6 +42,58 @@ function Summarize-Errors([string[]]$Paths) {
         }
     }
     return $out.ToArray()
+}
+
+# Approximate the TAR writer's second-only mtime precision *without*
+# deleting, replacing, or following content outside this unique test cache.
+# This is a metadata-perturbation probe, not an actual TAR restore.
+function Truncate-CacheFileTimestamps([string]$CacheDirectory) {
+    if (-not [IO.Directory]::Exists($CacheDirectory)) { throw "Missing isolated cache: $CacheDirectory" }
+    $seen = 0
+    $changed = 0
+    $maxLoss = 0.0
+    foreach ($file in [IO.Directory]::EnumerateFiles($CacheDirectory, '*', [IO.SearchOption]::AllDirectories)) {
+        $attributes = [IO.File]::GetAttributes($file)
+        if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Refusing to alter a reparse-point file in isolated cache: $file"
+        }
+        $before = [IO.File]::GetLastWriteTimeUtc($file)
+        $newTicks = $before.Ticks - ($before.Ticks % [TimeSpan]::TicksPerSecond)
+        $rounded = [datetime]::new($newTicks, [DateTimeKind]::Utc)
+        $seen++
+        if ($rounded.Ticks -ne $before.Ticks) {
+            [IO.File]::SetLastWriteTimeUtc($file, $rounded)
+            $actual = [IO.File]::GetLastWriteTimeUtc($file)
+            if ($actual.Ticks -ne $rounded.Ticks) {
+                throw "File mtime did not round to the requested second: $file"
+            }
+            $changed++
+            $maxLoss = [Math]::Max($maxLoss, ($before - $actual).TotalSeconds)
+        }
+    }
+    return [pscustomobject]@{
+        files_seen = $seen
+        files_changed = $changed
+        maximum_timestamp_loss_seconds = [Math]::Round($maxLoss, 7)
+    }
+}
+
+function Read-AssetScanCounters([string]$StandardOutput) {
+    # Optional: O3DE can log scan stats elsewhere. Missing logs are unknown,
+    # never treat an absent counter as zero jobs or as a cache hit.
+    if (-not [IO.File]::Exists($StandardOutput)) { return $null }
+    $pattern = 'Assessing files from scanner complete\. Total files: (\d+)\. Assets with new builders: (\d+)\. Unregistered/new files: (\d+)\. Old timestamps: (\d+)\. Modified dependencies: (\d+)\.'
+    $matchLine = Select-String -LiteralPath $StandardOutput -Pattern $pattern | Select-Object -Last 1
+    if (-not $matchLine) { return $null }
+    $found = [regex]::Match($matchLine.Line, $pattern)
+    if (-not $found.Success) { return $null }
+    return [pscustomobject]@{
+        total_files = [int]$found.Groups[1].Value
+        builders_changed = [int]$found.Groups[2].Value
+        new_files = [int]$found.Groups[3].Value
+        old_timestamps = [int]$found.Groups[4].Value
+        modified_dependencies = [int]$found.Groups[5].Value
+    }
 }
 
 function Invoke-IsolatedBatch([int]$Attempt, [string]$Exe, [string[]]$Arguments, [string]$LogDirectory, [int]$TimeoutSeconds) {
@@ -84,6 +137,18 @@ $report = [ordered]@{
     expected_engine_commit = $ExpectedEngineCommit
     max_jobs_override = $MaxJobs
     zero_analysis_comparison_requested = [bool]$CompareZeroAnalysisBaseline
+    timestamp_probe_requested = [bool]$TimestampTruncationProbe
+    timestamp_probe_method = 'seconds-only mtime truncation in a unique isolated cache (not a TAR restore)'
+    timestamp_probe_files_seen = $null
+    timestamp_probe_files_changed = $null
+    timestamp_probe_max_loss_seconds = $null
+    timestamp_probe_normal_warm_seconds = $null
+    timestamp_probe_post_truncation_seconds = $null
+    timestamp_probe_elapsed_ratio = $null
+    timestamp_probe_warm_scan_counters = $null
+    timestamp_probe_post_scan_counters = $null
+    timestamp_probe_post_exit_code = $null
+    timestamp_probe_product_sha256_matches = $null
     zero_analysis_baseline_arguments = $null
     zero_analysis_baseline_exit_code = $null
     zero_analysis_baseline_restored = $null
@@ -123,6 +188,9 @@ try {
     $EngineSource = [IO.Path]::GetFullPath($EngineSource).TrimEnd('\')
     $BuildRoot = [IO.Path]::GetFullPath($BuildRoot).TrimEnd('\')
     $WorkRoot = [IO.Path]::GetFullPath($WorkRoot).TrimEnd('\')
+    if ($TimestampTruncationProbe -and -not $WarmRun) {
+        throw 'TimestampTruncationProbe requires -WarmRun to establish an unchanged-cache baseline'
+    }
     if (-not [IO.File]::Exists((Join-Path $EngineSource 'engine.json'))) {
         throw "O3DE engine.json not found: $EngineSource"
     }
@@ -273,7 +341,40 @@ try {
             }
             Write-Host 'PASS: unchanged asset remains correct on warm scan'
         }
-        $recoveryAttempt = if ($WarmRun) { 3 } else { 2 }
+        if ($TimestampTruncationProbe) {
+            # The warm scan above is the reference. Seed a deterministic
+            # fractional mtime on one isolated product so the experiment
+            # cannot silently become a no-op on a whole-second filesystem.
+            $preRound = [IO.File]::GetLastWriteTimeUtc($productPath)
+            $seedTicks = $preRound.Ticks - ($preRound.Ticks % [TimeSpan]::TicksPerSecond) + 1234567
+            [IO.File]::SetLastWriteTimeUtc($productPath, [datetime]::new($seedTicks, [DateTimeKind]::Utc))
+            if ((Get-Sha256 $productPath) -cne $sourceHash) {
+                throw 'Timestamp fixture unexpectedly changed product content'
+            }
+            $changedTimes = Truncate-CacheFileTimestamps $cache
+            $report.timestamp_probe_files_seen = $changedTimes.files_seen
+            $report.timestamp_probe_files_changed = $changedTimes.files_changed
+            $report.timestamp_probe_max_loss_seconds = $changedTimes.maximum_timestamp_loss_seconds
+            $report.timestamp_probe_normal_warm_seconds = $warm.elapsed_seconds
+            $report.timestamp_probe_warm_scan_counters = Read-AssetScanCounters $warm.stdout
+            if ($changedTimes.files_changed -eq 0) { throw 'Timestamp probe did not alter any cache file mtimes' }
+            $postAttempt = 3
+            $post = Invoke-IsolatedBatch -Attempt $postAttempt -Exe $ap -Arguments $args -LogDirectory $logs -TimeoutSeconds $AssetTimeoutSeconds
+            $runResults.Add($post)
+            $report.timestamp_probe_post_exit_code = $post.exit_code
+            $report.timestamp_probe_post_truncation_seconds = $post.elapsed_seconds
+            $report.timestamp_probe_post_scan_counters = Read-AssetScanCounters $post.stdout
+            if ($warm.elapsed_seconds -gt 0) {
+                $report.timestamp_probe_elapsed_ratio = [Math]::Round($post.elapsed_seconds / $warm.elapsed_seconds, 3)
+            }
+            if ($post.timed_out) { throw "AssetProcessorBatch timed out on timestamp probe after $AssetTimeoutSeconds seconds" }
+            $hashMatches = [IO.File]::Exists($productPath) -and ((Get-Sha256 $productPath) -ceq $sourceHash)
+            $report.timestamp_probe_product_sha256_matches = [bool]$hashMatches
+            if (-not $hashMatches) { throw 'Timestamp probe product SHA256 mismatch or missing product' }
+            Write-Host ("PASS: timestamp-only probe preserved product SHA256; {0}/{1} cache file mtimes changed, post/warm duration ratio={2}" -f $changedTimes.files_changed, $changedTimes.files_seen, $report.timestamp_probe_elapsed_ratio)
+            Write-Host 'NOTE: timing/scan counters are observational, not a proof of cache-hit equivalence'
+        }
+        $recoveryAttempt = 2 + [int][bool]$WarmRun + [int][bool]$TimestampTruncationProbe
         Remove-Item -LiteralPath $productPath -Force -ErrorAction Stop
         if ([IO.File]::Exists($productPath)) { throw 'Could not delete the isolated product fixture' }
         if ($MaterialPipelineProbe) {

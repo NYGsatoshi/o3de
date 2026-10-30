@@ -55,6 +55,10 @@ static class FakeAssetProcessor
                 {
                     File.WriteAllText(target, "deliberately corrupted copy-job output");
                 }
+                if (mode == "timestamp-corrupt" && run == 3)
+                {
+                    File.WriteAllText(target, "injected corruption after timestamp-only perturbation");
+                }
             }
 
             if (!(mode == "missing-azsl" && run >= 2))
@@ -67,7 +71,7 @@ static class FakeAssetProcessor
             }
 
             Console.WriteLine($"FakeAP run={run} mode={mode} zeroAnalysis={zeroAnalysis} product={File.Exists(target)} material={File.Exists(material)}");
-            if (mode == "nonzero-but-restored")
+            if (mode == "nonzero-but-restored" || (mode == "timestamp-nonzero" && run == 3))
             {
                 Console.Error.WriteLine("Injected unrelated AssetProcessor job failure");
                 return 7;
