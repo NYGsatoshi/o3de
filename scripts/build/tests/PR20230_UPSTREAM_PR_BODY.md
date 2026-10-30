@@ -66,8 +66,8 @@ This enables normal analysis of restored caches and allows missing products to b
 
 - [x] [Fork verification run #41033257437](https://github.com/NYGsatoshi/o3de/actions/runs/41033257437) — **SUCCESS (6/6 jobs)** at `50bac95`. Tests include production compression/extraction contracts, expected upload suppression on 7-Zip failure, corrupted TAR cache cleanup, Unicode and long paths, file count/SHA-256 verification after independent Artifact transport, and isolated harness preflight.
 - [x] Confirmed that the three production files in the fork verification branch are byte-identical (Git blob SHA) to PR HEAD `671e439e986dd8a75a89578ca27f50ce04a9d36c`.
-- [x] Simulated AssetProcessor harness state matrix (12 scenarios, including `--zeroAnalysisMode` baseline, PARTIAL, INCONCLUSIVE, timeout, revision mismatch) passed. **This does not execute O3DE's actual AssetProcessorBatch.exe**.
-- [ ] Obtain a full, successful real AssetProcessorBatch run on the current PR revision in an isolated short-path project and verify the baseline with and without `--zeroAnalysisMode`.
+- [x] Simulated AssetProcessor harness state matrix (15 scenarios, including `--zeroAnalysisMode` baseline, timestamp-only A/B scanning, PARTIAL, INCONCLUSIVE, timeout, revision mismatch and deliberate product corruption) passed on [fork CI #41058592680](https://github.com/NYGsatoshi/o3de/actions/runs/41058592680). **This does not execute O3DE's actual AssetProcessorBatch.exe**.
+- [ ] Obtain a full, successful real AssetProcessorBatch run on the current PR revision in an isolated short-path project, verify the baseline with/without `--zeroAnalysisMode`, and measure cache mtime truncation effects with the optional timestamp-only A/B probe. The recorded single-run timing ratio is diagnostic, not an acceptance threshold.
 
 **Pending validation**
 
