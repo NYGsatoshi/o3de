@@ -52,6 +52,19 @@ The harness records the source commit, AssetProcessor binary SHA-256/mtime, the 
 
 The zero-analysis comparison uses the **same Windows PC platform synthetic project** with the newly regenerated product deleted for a second time. It does not establish Android recovery, and a successful control is not a substitute for a warm-cache performance benchmark. The optional `-MaterialPipelineProbe` requires actual Material Type Builder intermediates; the minimal project's default Gem configuration may not provide them.
 
+## Four-cache timestamp matrix (2026-10-30)
+
+[GitHub-hosted Windows verification #41053475713](https://github.com/NYGsatoshi/o3de/actions/runs/41053475713) passed its archive producer/independent-restorer integrity tests. **1,045 files** retained the same paths and SHA-256 content hashes after extraction and GitHub Artifact transport.
+
+| Cache directory | 7-Zip TAR mtime loss | Independent runner mtime loss |
+| --- | ---: | ---: |
+| `.ccache` | 0.1234567 s | 0.1234567 s |
+| `.o3de/python/downloaded_packages` | 0.4567890 s | 0.4567890 s |
+| `3rdParty/downloaded_packages` | 0.7890123 s | 0.7890123 s |
+| `AutomatedTesting/Cache` | 0.9876543 s | 0.9876543 s |
+
+The legacy POSIX-TAR comparison of the `.ccache` fixture showed **0.0000000 s** loss. These values demonstrate subsecond mtime truncation by the 7-Zip TAR writer on this Windows runner. They **do not prove** an actual O3DE AssetProcessor cache-hit regression. Real AP cold/warm timing and job-count comparisons remain required.
+
 ## Remaining proof
 
 1. Run real AssetProcessorBatch against an appropriately built PR revision and obtain `PASS`, or preserve the `PARTIAL`/`INCONCLUSIVE` report with logs for diagnosis.

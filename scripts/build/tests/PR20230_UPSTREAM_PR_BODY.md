@@ -103,7 +103,7 @@ The Windows CI Asset job did complete successfully.
 
 **Measured metadata difference (GitHub-hosted Windows runner)**
 
-One reproducible timestamp fixture lost `0.1234567` seconds with 7-Zip TAR, compared with `0.0000000` seconds for legacy POSIX TAR; the same `0.1234567`-second loss remained after GitHub Artifact transfer. **This is a timestamp precision measurement, not evidence of AssetProcessor cache invalidation or performance regression.** See the [fork verification procedure and evidence](https://github.com/NYGsatoshi/o3de/blob/test/pr20230-cache-archive-20261025/scripts/build/tests/PR20230_VALIDATION.md).
+[Fork Windows CI #41053475713](https://github.com/NYGsatoshi/o3de/actions/runs/41053475713) verified 1,045 paths/SHA-256 hashes after separate-runner Artifact transport. On four timestamp fixtures across the four production cache directories, 7-Zip TAR lost respectively `0.1234567`, `0.4567890`, `0.7890123`, and `0.9876543` seconds; the independent restorer observed the same losses. Legacy POSIX TAR preserved the first fixture at `0.0000000` seconds loss. **This is a metadata precision measurement, not evidence of AssetProcessor cache invalidation or performance regression.** See the [fork verification procedure and evidence](https://github.com/NYGsatoshi/o3de/blob/test/pr20230-cache-archive-20261025/scripts/build/tests/PR20230_VALIDATION.md).
 
 ### Remaining considerations
 
