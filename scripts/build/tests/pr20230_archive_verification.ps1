@@ -26,6 +26,14 @@ $archive = Join-Path $root 'cache.tar'
 $legacy = Join-Path $root 'legacy-posix.tar'
 $legacyRestored = Join-Path $root 'legacy-restored'
 $paths = @('.ccache', '.o3de\python\downloaded_packages', '3rdParty\downloaded_packages', 'AutomatedTesting\Cache')
+# Exercise several fractional-second mtimes across every production cache root.
+# These are metadata transport checks; real AssetProcessor cache-hit behavior is separate.
+$timestampFixtures = @(
+    [pscustomobject]@{ Relative = '.ccache\precision.bin'; FractionalTicks = 1234567 }
+    [pscustomobject]@{ Relative = '.o3de\python\downloaded_packages\precision.bin'; FractionalTicks = 4567890 }
+    [pscustomobject]@{ Relative = '3rdParty\downloaded_packages\precision.bin'; FractionalTicks = 7890123 }
+    [pscustomobject]@{ Relative = 'AutomatedTesting\Cache\precision.bin'; FractionalTicks = 9876543 }
+)
 
 function LongPath([string]$path) {
     $absolute = [IO.Path]::GetFullPath($path)
@@ -74,6 +82,25 @@ function Assert-Same([string]$leftDir, [string]$rightDir) {
     }
     Write-Host "PASS: $($left.Count) files restored with byte-identical content and paths"
 }
+function Assert-TimestampMatrix([object[]]$expected, [string]$directory, [string]$description) {
+    if ($expected.Count -ne $timestampFixtures.Count) {
+        throw "Missing expected timestamp records: $($expected.Count) / $($timestampFixtures.Count)"
+    }
+    foreach ($fixture in $timestampFixtures) {
+        $matches = @($expected | Where-Object { $_.Relative -ceq $fixture.Relative })
+        if ($matches.Count -ne 1) { throw "Missing/duplicate timestamp fixture: $($fixture.Relative)" }
+        $path = Join-Path $directory $fixture.Relative
+        if (-not [IO.File]::Exists((LongPath $path))) { throw "Missing timestamp file: $path" }
+        $expectedUtc = [datetime]::new([long]$matches[0].UtcTicks, [DateTimeKind]::Utc)
+        $actualUtc = [IO.File]::GetLastWriteTimeUtc((LongPath $path))
+        $delta = [math]::Abs(($expectedUtc - $actualUtc).TotalSeconds)
+        Write-Host ("{0} timestamp delta ({1}): {2:F7}s" -f $description, $fixture.Relative, $delta)
+        if ($delta -gt 1.0) {
+            throw "Unexpected timestamp loss exceeding one second: $($fixture.Relative), delta=$delta"
+        }
+    }
+    Write-Host "PASS: $description timestamp matrix across all four cache roots"
+}
 
 # Verify the same TAR and source manifest after transfer via GitHub Actions Artifact.
 # This runs on an independent Windows runner, not on the producer's filesystem.
@@ -81,11 +108,15 @@ if (-not [string]::IsNullOrWhiteSpace($VerifyTransportDirectory)) {
     $bundle = [IO.Path]::GetFullPath($VerifyTransportDirectory)
     $transportArchive = Join-Path $bundle 'cache.tar'
     $manifestFile = Join-Path $bundle 'expected-manifest.txt'
+    $timestampManifest = Join-Path $bundle 'expected-timestamps.json'
     if (-not [IO.File]::Exists((LongPath $transportArchive))) {
         throw 'Transported cache.tar is missing'
     }
     if (-not [IO.File]::Exists((LongPath $manifestFile))) {
         throw 'Independent pre-archive manifest is missing'
+    }
+    if (-not [IO.File]::Exists((LongPath $timestampManifest))) {
+        throw 'Independent pre-archive timestamp matrix is missing'
     }
     & $sevenZip t -ttar $transportArchive | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Transported TAR structure is invalid' }
@@ -108,13 +139,10 @@ if (-not [string]::IsNullOrWhiteSpace($VerifyTransportDirectory)) {
             throw "Transported cache directory is missing: $relative"
         }
     }
-    $reference = [datetime]::new(2026, 1, 2, 3, 4, 5, [DateTimeKind]::Utc).AddTicks(1234567)
-    $restoredTime = [IO.File]::GetLastWriteTimeUtc((LongPath (Join-Path $restored '.ccache\precision.bin')))
-    $delta = [math]::Abs(($reference - $restoredTime).TotalSeconds)
-    Write-Host ("Transported TAR timestamp delta (s): {0:F7}" -f $delta)
-    if ($delta -gt 1.0) { throw 'Transported TAR timestamp loss exceeds one second' }
+    $transportedTimestamps = @([IO.File]::ReadAllText((LongPath $timestampManifest), [Text.Encoding]::UTF8) | ConvertFrom-Json)
+    Assert-TimestampMatrix $transportedTimestamps $restored 'Transported TAR'
     Write-Host "PASS: GitHub Artifact transport preserved $($actualManifest.Count) paths and SHA256 hashes"
-    Write-Host 'PASS: all four cache directories and timestamp fixture survived independent restoration'
+    Write-Host 'PASS: all four cache directories and timestamp fixtures survived independent restoration'
     return
 }
 
@@ -145,10 +173,20 @@ Write-Data $longFile 'Over 330 characters long path round-trip'
 if ($longFile.Length -le 330) { throw 'Long-path fixture is too short' }
 Write-Host "Long-path fixture length: $($longFile.Length)"
 
+$timestampReference = [datetime]::new(2026, 1, 2, 3, 4, 5, [DateTimeKind]::Utc)
+$timestampRecords = @(
+    foreach ($fixture in $timestampFixtures) {
+        $file = Join-Path $source $fixture.Relative
+        Write-Data $file 'Timestamp precision probe'
+        [IO.File]::SetLastWriteTimeUtc((LongPath $file), $timestampReference.AddTicks($fixture.FractionalTicks))
+        [pscustomobject]@{
+            Relative = $fixture.Relative
+            UtcTicks = [IO.File]::GetLastWriteTimeUtc((LongPath $file)).Ticks
+        }
+    }
+)
+# Retain the original precision.bin fixture for POSIX TAR comparison.
 $timestampFile = Join-Path $source '.ccache\precision.bin'
-Write-Data $timestampFile 'Timestamp precision probe'
-$reference = [datetime]::new(2026, 1, 2, 3, 4, 5, [DateTimeKind]::Utc).AddTicks(1234567)
-[IO.File]::SetLastWriteTimeUtc((LongPath $timestampFile), $reference)
 $beforeTime = [IO.File]::GetLastWriteTimeUtc((LongPath $timestampFile))
 
 Push-Location $source
@@ -182,10 +220,7 @@ if (-not [IO.File]::Exists((LongPath $longRestored))) {
 }
 Write-Host 'PASS: long path survived TAR round trip'
 
-$afterTime = [IO.File]::GetLastWriteTimeUtc((LongPath (Join-Path $restored '.ccache\precision.bin')))
-$delta = [math]::Abs(($beforeTime - $afterTime).TotalSeconds)
-Write-Host ("7-Zip TAR timestamp delta (s): {0:F7}" -f $delta)
-if ($delta -gt 2.0) { throw 'Unexpected timestamp loss beyond 2 seconds' }
+Assert-TimestampMatrix $timestampRecords $restored '7-Zip TAR'
 
 # Legacy POSIX-TAR timestamp comparison: compatibility measurement, not an AP cache-hit test.
 Push-Location $source
@@ -217,6 +252,11 @@ if (-not [string]::IsNullOrWhiteSpace($ExportDirectory)) {
     [IO.File]::WriteAllLines(
         (LongPath (Join-Path $exportRoot 'expected-manifest.txt')),
         $expected,
+        [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::WriteAllText(
+        (LongPath (Join-Path $exportRoot 'expected-timestamps.json')),
+        (ConvertTo-Json -InputObject $timestampRecords -Depth 3),
         [Text.UTF8Encoding]::new($false)
     )
     Write-Host "PASS: exported TAR and independent $($expected.Length)-file manifest for cross-job verification"
