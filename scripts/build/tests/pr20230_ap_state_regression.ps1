@@ -41,7 +41,9 @@ $matrix = @(
     [pscustomobject]@{ name='initial-missing'; mode='initial-product-missing'; expected='FAIL'; code=1; runs=1; warm=$false; material=$false; hash=$false; materialHash=$null; errorPattern='Initial copy-job product missing' },
     [pscustomobject]@{ name='warm-material-success'; mode='pass'; expected='PASS'; code=0; runs=3; warm=$true; material=$true; hash=$true; materialHash=$true; errorPattern=$null },
     [pscustomobject]@{ name='missing-azsl'; mode='missing-azsl'; expected='FAIL'; code=1; runs=2; warm=$false; material=$true; hash=$true; materialHash=$false; errorPattern='AZSL intermediate was NOT regenerated' },
-    [pscustomobject]@{ name='bad-azsl'; mode='bad-azsl'; expected='FAIL'; code=1; runs=2; warm=$false; material=$true; hash=$true; materialHash=$false; errorPattern='AZSL intermediate SHA256 mismatch' }
+    [pscustomobject]@{ name='bad-azsl'; mode='bad-azsl'; expected='FAIL'; code=1; runs=2; warm=$false; material=$true; hash=$true; materialHash=$false; errorPattern='AZSL intermediate SHA256 mismatch' },
+    [pscustomobject]@{ name='timeout'; mode='slow-timeout'; expected='FAIL'; code=1; runs=1; warm=$false; material=$false; hash=$false; materialHash=$null; errorPattern='timed out on attempt 1' },
+    [pscustomobject]@{ name='revision-mismatch'; mode='pass'; expected='FAIL'; code=1; runs=0; warm=$false; material=$false; hash=$false; materialHash=$null; errorPattern='Engine revision mismatch' }
 )
 $oldMode = [Environment]::GetEnvironmentVariable('PR20230_FAKE_AP_MODE')
 try {
@@ -58,6 +60,8 @@ try {
         }
         if ($case.warm) { $parameters['WarmRun'] = $true }
         if ($case.material) { $parameters['MaterialPipelineProbe'] = $true }
+        if ($case.name -eq 'timeout') { $parameters['AssetTimeoutSeconds'] = 1 }
+        if ($case.name -eq 'revision-mismatch') { $parameters['ExpectedEngineCommit'] = '0000000000000000000000000000000000000000' }
 
         & $harness @parameters
         $actualExit = $LASTEXITCODE
@@ -71,6 +75,12 @@ try {
         }
         if (@($report.runs).Count -ne $case.runs) {
             throw "[$($case.name)] unexpected run count $(@($report.runs).Count), expected $($case.runs)"
+        }
+        if ($case.name -eq 'timeout' -and (@($report.runs).Count -ne 1 -or -not $report.runs[0].timed_out -or $report.runs[0].exit_code -ne 124)) {
+            throw '[timeout] the timed-out child was not recorded with exit code 124'
+        }
+        if ($case.name -ne 'revision-mismatch' -and (-not $report.asset_processor_binary_sha256 -or $report.asset_processor_binary_sha256.Length -ne 64)) {
+            throw "[$($case.name)] missing binary SHA256 provenance"
         }
         if ([bool]$report.sha256_matches -ne [bool]$case.hash) {
             throw "[$($case.name)] incorrect restored copy-job hash status"
@@ -95,5 +105,5 @@ try {
 finally {
     [Environment]::SetEnvironmentVariable('PR20230_FAKE_AP_MODE', $oldMode)
 }
-Write-Host "PASS: $($matrix.Count) AssetProcessor harness state-machine cases"
+Write-Host "PASS: $($matrix.Count) AssetProcessor harness state-machine cases (including timeout and engine revision mismatch)"
 exit 0

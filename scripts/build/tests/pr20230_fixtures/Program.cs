@@ -44,6 +44,10 @@ static class FakeAssetProcessor
             File.WriteAllText(marker, run.ToString());
 
             string mode = Environment.GetEnvironmentVariable("PR20230_FAKE_AP_MODE") ?? "pass";
+            if (mode == "slow-timeout" && run == 1)
+            {
+                System.Threading.Thread.Sleep(4500);
+            }
 
             if (!(mode == "initial-product-missing" && run == 1) &&
                 !(mode == "missing-copy" && run >= 2))
