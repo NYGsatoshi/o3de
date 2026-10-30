@@ -12,6 +12,7 @@ param(
     [string]$WorkRoot = (Join-Path $HOME 'p30'),
     [ValidateRange(1, 14400)][int]$AssetTimeoutSeconds = 5400,
     [string]$ExpectedEngineCommit = '',
+    [ValidateRange(0, 64)][int]$MaxJobs = 0,
     [switch]$PreflightOnly,
     [switch]$WarmRun,
     [switch]$MaterialPipelineProbe,
@@ -80,6 +81,7 @@ $report = [ordered]@{
     engine_source = $EngineSource
     engine_git_head = $null
     expected_engine_commit = $ExpectedEngineCommit
+    max_jobs_override = $MaxJobs
     asset_processor_binary_sha256 = $null
     asset_processor_binary_last_write_utc = $null
     build_root = $BuildRoot
@@ -197,6 +199,12 @@ try {
         '--platforms=pc',
         '--ignoreFutureAssetDatabaseVersionError'
     )
+    if ($MaxJobs -gt 0) {
+        # Limit AssetProcessor workers on memory-constrained local machines.
+        # 0 retains the engine's automatic default from settings.assetprocessorbatch.setreg.
+        $args += ('--regset="/Amazon/AssetProcessor/Settings/Jobs/maxJobs=' + $MaxJobs + '"')
+        Write-Host "AssetProcessor maxJobs override: $MaxJobs"
+    }
     if (@($args | Where-Object { $_ -match 'zeroAnalysisMode' }).Count -gt 0) {
         throw 'zeroAnalysisMode must not be enabled during recovery validation'
     }

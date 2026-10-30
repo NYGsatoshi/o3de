@@ -60,6 +60,7 @@ try {
         }
         if ($case.warm) { $parameters['WarmRun'] = $true }
         if ($case.material) { $parameters['MaterialPipelineProbe'] = $true }
+        if ($case.name -eq 'success') { $parameters['MaxJobs'] = 2 }
         if ($case.name -eq 'timeout') { $parameters['AssetTimeoutSeconds'] = 1 }
         if ($case.name -eq 'revision-mismatch') { $parameters['ExpectedEngineCommit'] = '0000000000000000000000000000000000000000' }
 
@@ -92,6 +93,11 @@ try {
         }
         if ($case.errorPattern -and [string]$report.error -notmatch $case.errorPattern) {
             throw "[$($case.name)] unexpected failure diagnostic: $($report.error)"
+        }
+        if ($case.name -eq 'success') {
+            if ($report.max_jobs_override -ne 2 -or @($report.arguments | Where-Object { $_ -match 'maxJobs=2' }).Count -ne 1) {
+                throw '[success] maxJobs override did not reach the AssetProcessor command line'
+            }
         }
         if ($report.status -eq 'PARTIAL' -and $report.batch_full_success) {
             throw 'PARTIAL incorrectly reports full Batch success'
