@@ -117,23 +117,6 @@ try {
     if (-not [IO.File]::Exists((Join-Path $EngineSource 'engine.json'))) {
         throw "O3DE engine.json not found: $EngineSource"
     }
-    # The source revision is recorded alongside binary provenance. If a SHA
-    # is supplied, reject a build checkout from an unintended PR revision.
-    $gitExecutable = Get-Command git -ErrorAction SilentlyContinue
-    if ($null -ne $gitExecutable) {
-        $rev = @(& git -C $EngineSource rev-parse --verify HEAD 2>$null)
-        if ($LASTEXITCODE -eq 0 -and $rev.Count -eq 1 -and $rev[0] -match '^[0-9a-fA-F]{40}$') {
-            $report.engine_git_head = $rev[0]
-        }
-    }
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedEngineCommit)) {
-        if ($ExpectedEngineCommit -notmatch '^[0-9a-fA-F]{7,40}$') {
-            throw 'ExpectedEngineCommit must be a hexadecimal Git SHA prefix (7 to 40 characters)'
-        }
-        if (-not $report.engine_git_head -or -not $report.engine_git_head.StartsWith($ExpectedEngineCommit, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Engine revision mismatch: expected $ExpectedEngineCommit; actual $($report.engine_git_head)"
-        }
-    }
     foreach ($forbidden in @($EngineSource, $BuildRoot)) {
         if ($WorkRoot.Equals($forbidden, [StringComparison]::OrdinalIgnoreCase) -or $WorkRoot.StartsWith(($forbidden + '\'), [StringComparison]::OrdinalIgnoreCase)) {
             throw "WorkRoot must not be inside the O3DE source/build directory: $WorkRoot"
@@ -169,6 +152,24 @@ try {
     $report.build_root = $BuildRoot
     $report.work_root = $WorkRoot
     $report.case_root = $caseRoot
+
+    # The source revision is recorded alongside binary provenance. If a SHA
+    # is supplied, reject a build checkout from an unintended PR revision.
+    $gitExecutable = Get-Command git -ErrorAction SilentlyContinue
+    if ($null -ne $gitExecutable) {
+        $rev = @(& git -C $EngineSource rev-parse --verify HEAD 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $rev.Count -eq 1 -and $rev[0] -match '^[0-9a-fA-F]{40}$') {
+            $report.engine_git_head = $rev[0]
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedEngineCommit)) {
+        if ($ExpectedEngineCommit -notmatch '^[0-9a-fA-F]{7,40}$') {
+            throw 'ExpectedEngineCommit must be a hexadecimal Git SHA prefix (7 to 40 characters)'
+        }
+        if (-not $report.engine_git_head -or -not $report.engine_git_head.StartsWith($ExpectedEngineCommit, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Engine revision mismatch: expected $ExpectedEngineCommit; actual $($report.engine_git_head)"
+        }
+    }
 
     $metadata = [ordered]@{
         project_name = 'Pr20230CacheProbe'
