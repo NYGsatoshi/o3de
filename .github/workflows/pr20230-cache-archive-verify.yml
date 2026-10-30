@@ -143,3 +143,19 @@ jobs:
           }
           & $file -PreflightOnly -EngineSource (Get-Location).Path -WorkRoot (Join-Path $env:RUNNER_TEMP 'p30')
           if ($LASTEXITCODE -ne 0) { throw "Recovery preflight failed: $LASTEXITCODE" }
+
+  asset-processor-state-matrix:
+    name: AssetProcessor Harness State Matrix / Fake Binary
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Checkout isolated recovery harness and simulation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          lfs: false
+      - name: Exercise recovery reporting with real child processes
+        shell: pwsh
+        run: |
+          & .\scripts\build\tests\pr20230_ap_state_regression.ps1
+          if ($LASTEXITCODE -ne 0) { throw "AP state matrix failed ($LASTEXITCODE)" }
