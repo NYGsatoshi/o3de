@@ -48,16 +48,18 @@ try {
     foreach ($case in $matrix) {
         $env:PR20230_FAKE_AP_MODE = $case.mode
         $work = Join-Path $temp ("state " + $case.name)
-        $args = @(
-            '-EngineSource', $repo,
-            '-BuildRoot', $build,
-            '-WorkRoot', $work,
-            '-AssetTimeoutSeconds', '120'
-        )
-        if ($case.warm) { $args += '-WarmRun' }
-        if ($case.material) { $args += '-MaterialPipelineProbe' }
+        # A hashtable is required for named-parameter splatting. An array
+        # would bind these tokens positionally and corrupt parameter values.
+        $parameters = @{
+            EngineSource = $repo
+            BuildRoot = $build
+            WorkRoot = $work
+            AssetTimeoutSeconds = 120
+        }
+        if ($case.warm) { $parameters['WarmRun'] = $true }
+        if ($case.material) { $parameters['MaterialPipelineProbe'] = $true }
 
-        & $harness @args
+        & $harness @parameters
         $actualExit = $LASTEXITCODE
         $reports = @(Get-ChildItem -LiteralPath $work -Filter 'report.json' -Recurse -File -ErrorAction Stop)
         if ($reports.Count -ne 1) {
