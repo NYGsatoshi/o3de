@@ -1,0 +1,195 @@
+# Copyright (c) Contributors to the Open 3D Engine Project.
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Fork-only real O3DE AssetProcessor integration; not part of upstream PR.
+name: PR20230 Real AP Android and Linux-PC Recovery
+on:
+  push:
+    branches:
+      - test/pr20230-real-ap-android-windows-20261123
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pr20230-real-ap-android-pc
+  cancel-in-progress: true
+env:
+  PR20230_BASE_SHA: 9282bcc049561a21989063f1e6449cf0ca54d964
+jobs:
+  preflight:
+    name: Source provenance and Python harness preflight
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout fork-only test branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          lfs: false
+          fetch-depth: 16
+      - name: Ensure production files are unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e "$PR20230_BASE_SHA^{commit}"
+          git merge-base --is-ancestor "$PR20230_BASE_SHA" HEAD
+          for path in .github/workflows/windows-build.yml \
+                      scripts/build/Platform/Windows/build_config.json \
+                      scripts/build/Platform/Android/build_config.json; do
+            [[ "$(git rev-parse "$PR20230_BASE_SHA:$path")" == "$(git rev-parse "HEAD:$path")" ]] || {
+              echo "::error::Production code drift: $path"; exit 1;
+            }
+            echo "PASS: untouched production file $path"
+          done
+          echo "Current verification checkout: $(git rev-parse HEAD)"
+      - name: Python syntax and short-path preflight (no real AP claims)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/build/tests/pr20230_real_ap_linux_recovery.py
+          mkdir -p build/linux
+          python3 scripts/build/tests/pr20230_real_ap_linux_recovery.py \
+            --engine-source . --build-root build/linux --platform android \
+            --work-root /tmp/p30 --preflight-only
+          python3 scripts/build/tests/pr20230_real_ap_linux_recovery.py \
+            --engine-source . --build-root build/linux --platform pc \
+            --work-root /tmp/p30 --preflight-only
+
+  real-ap:
+    name: Compile REAL O3DE AP then inject Android and PC cache faults
+    needs: preflight
+    runs-on: ubuntu-22.04
+    timeout-minutes: 230
+    env:
+      LY_PACKAGE_SERVER_URLS: "https://prod.packages.o3debinaries.org;https://dev.packages.o3debinaries.org"
+      LY_MIN_MEMORY_PER_CORE: "2097152"
+      LY_3RDPARTY_PATH: "${{ github.workspace }}/3rdParty"
+    steps:
+      - name: Check disk space
+        id: disk
+        shell: bash
+        run: |
+          available=$(df "$GITHUB_WORKSPACE" --output=avail --block-size=1G | tail -1 | tr -d ' ')
+          echo "Available workspace space: $available GiB"
+          if [ "$available" -lt 70 ]; then echo "resize=true" >> "$GITHUB_OUTPUT"; else echo "resize=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Expand disk using the upstream AR action
+        if: steps.disk.outputs.resize == 'true'
+        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c # v10
+        with:
+          root-reserve-mb: 8000
+          swap-size-mb: 200
+          remove-dotnet: true
+          remove-haskell: true
+          remove-codeql: true
+          remove-docker-images: true
+      - name: Checkout real O3DE source and fork-only test code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          lfs: false
+          fetch-depth: 16
+          show-progress: false
+      - name: Verify production source provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e "$PR20230_BASE_SHA^{commit}"
+          git merge-base --is-ancestor "$PR20230_BASE_SHA" HEAD
+          for path in .github/workflows/windows-build.yml \
+                      scripts/build/Platform/Windows/build_config.json \
+                      scripts/build/Platform/Android/build_config.json; do
+            [[ "$(git rev-parse "$PR20230_BASE_SHA:$path")" == "$(git rev-parse "HEAD:$path")" ]] || exit 1
+          done
+          echo "Engine checkout SHA: $(git rev-parse HEAD)"
+          echo "Pinned production PR SHA: $PR20230_BASE_SHA"
+      - name: Pull minimal LFS assets like upstream Android profile
+        shell: bash
+        run: |
+          git lfs install
+          git lfs pull --include "*.ico,*.bmp"
+      - name: Set up upstream CMake version
+        uses: lukka/get-cmake@f176ccd3f28bda569c43aae4894f06b2435a3375 # v4.2.3
+        with:
+          cmakeVersion: "4.2.3"
+          ninjaVersion: "1.13.2"
+      - name: Install official O3DE Linux dependencies and Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .o3de build/linux 3rdParty
+          ln -sfn "$GITHUB_WORKSPACE/.o3de" "$HOME/.o3de"
+          pushd scripts/build/build_node/Platform/Linux
+          sudo ./install-ubuntu.sh
+          popd
+          ./python/get_python.sh
+          ./scripts/o3de.sh register --this-engine
+      - name: Build real Linux-host AssetProcessorBatch from current PR code
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build/linux -G "Ninja Multi-Config" -DLY_PROJECTS=AutomatedTesting
+          cmake --build build/linux --target AssetProcessorBatch --config profile --parallel 3
+          test -x build/linux/bin/profile/AssetProcessorBatch
+          sha256sum build/linux/bin/profile/AssetProcessorBatch
+      - name: Real Android product recovery, timestamp probe and zero-analysis control
+        id: android
+        shell: bash
+        timeout-minutes: 65
+        continue-on-error: true # Preserve evidence even if AP returns PARTIAL.
+        run: |
+          python3 scripts/build/tests/pr20230_real_ap_linux_recovery.py \
+            --engine-source . --build-root build/linux --platform android \
+            --work-root /tmp/p30 --timeout-seconds 900 --max-jobs 2
+      - name: Real Linux-PC product recovery, timestamp probe and zero-analysis control
+        id: pc
+        shell: bash
+        timeout-minutes: 65
+        continue-on-error: true # Preserve evidence even if AP returns PARTIAL.
+        run: |
+          python3 scripts/build/tests/pr20230_real_ap_linux_recovery.py \
+            --engine-source . --build-root build/linux --platform pc \
+            --work-root /tmp/p30 --timeout-seconds 900 --max-jobs 2
+      - name: Copy only real AP reports and text logs
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p pr20230-real-ap-evidence
+          if [ -d /tmp/p30 ]; then
+            find /tmp/p30 -type f \( -name '*.log' -o -name '*.json' \) -print | while read -r file; do
+              relative=$(realpath --relative-to=/tmp/p30 "$file")
+              dest="pr20230-real-ap-evidence/$relative"
+              mkdir -p "$(dirname "$dest")"
+              cp "$file" "$dest"
+            done
+          fi
+          find pr20230-real-ap-evidence -type f | head -40
+      - name: Upload real AP run logs and JSON provenance
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: PR20230-REAL-AP-ANDROID-PC-EVIDENCE
+          path: pr20230-real-ap-evidence/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Gate full real AP acceptance on independently recorded JSON
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          results = {}
+          for path in Path("pr20230-real-ap-evidence").rglob("report.json"):
+              report = json.loads(path.read_text())
+              if report.get("status") != "PREFLIGHT_PASS" and report.get("platform") in ("android", "pc"):
+                  results[report["platform"]] = report
+          for platform in ("android", "pc"):
+              data = results.get(platform)
+              print(f"{platform}: {data.get('status') if data else 'NO_REPORT'}")
+              if data:
+                  print("  recovery:", data.get("normal_recovery_sha256_matches"))
+                  print("  contrast:", data.get("zero_analysis_contrast"))
+                  print("  timestamp:", data.get("timestamp_isolated_probe"))
+          if not all(results.get(p, {}).get("status") == "PASS" for p in ("android", "pc")):
+              raise SystemExit("Real AP acceptance not met: FAIL/PARTIAL/INCONCLUSIVE or missing report")
+          print("PASS: real Android and Linux-PC AP normal recovery and negative control")
+          PY
