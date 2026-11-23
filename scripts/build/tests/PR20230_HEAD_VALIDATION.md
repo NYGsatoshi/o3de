@@ -14,7 +14,7 @@ The workflow checks that the three modified production files (`.github/workflows
 
 ## Fork Actions verification
 
-Workflow: [PR20230 Current HEAD Independent Verification](../../.github/workflows/pr20230-head-verification.yml)
+Workflow: [PR20230 Current HEAD Independent Verification](../../../.github/workflows/pr20230-head-verification.yml)
 
 - **Provenance/config**: same production file contents, parse Windows/Android JSON, no `--zeroAnalysisMode` in `asset_profile`, unchanged platform selection.
 - **20,000-file archive**: run the existing tested Windows 7-Zip archive harness against all four production cache roots, Unicode filenames, >330-character path, manifest SHA-256, plus TAR mtime fixture matrix.
