@@ -1,0 +1,190 @@
+# Copyright (c) Contributors to the Open 3D Engine Project.
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Fork-only regression. This file is not included in upstream PR #20230.
+name: PR20230 Independent Latest-HEAD Regression
+
+on:
+  push:
+    branches:
+      - test/pr20230-head-verification-20261123
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr20230-independent-current-head
+  cancel-in-progress: true
+
+env:
+  PR20230_BASE_SHA: 9282bcc049561a21989063f1e6449cf0ca54d964
+
+jobs:
+  provenance:
+    name: Production blob identity / Windows + Android config
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout latest production baseline and fork tests
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          lfs: false
+          fetch-depth: 16
+      - name: Verify this branch has not changed the three PR production files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e "$PR20230_BASE_SHA^{commit}"
+          git merge-base --is-ancestor "$PR20230_BASE_SHA" HEAD
+          for path in \
+            .github/workflows/windows-build.yml \
+            scripts/build/Platform/Windows/build_config.json \
+            scripts/build/Platform/Android/build_config.json; do
+            before=$(git rev-parse "$PR20230_BASE_SHA:$path")
+            after=$(git rev-parse "HEAD:$path")
+            if [[ "$before" != "$after" ]]; then
+              echo "::error::Production file changed in fork-only verification: $path"
+              exit 1
+            fi
+            echo "PASS: $path blob $after"
+          done
+          echo "Baseline: $PR20230_BASE_SHA"
+          echo "Verification commit: $(git rev-parse HEAD)"
+          echo "Test-only changes:"
+          git diff --name-only "$PR20230_BASE_SHA" HEAD
+      - name: Check platform configuration and AssetProcessor flags
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          expected = {"Windows": "pc,server", "Android": "android"}
+          for platform, target in expected.items():
+              path = Path(f"scripts/build/Platform/{platform}/build_config.json")
+              config = json.loads(path.read_text(encoding="utf-8"))
+              settings = config["asset_profile"]["PARAMETERS"]
+              assert settings["CMAKE_TARGET"] == "AssetProcessorBatch", platform
+              assert settings["ASSET_PROCESSOR_PLATFORMS"] == target, platform
+              options = settings["ASSET_PROCESSOR_OPTIONS"]
+              assert "--zeroAnalysisMode" not in options, platform
+              assert "--ignoreFutureAssetDatabaseVersionError" in options, platform
+              print(f"PASS: {platform} target={target}; zeroAnalysisMode disabled")
+          workflow = Path(".github/workflows/windows-build.yml").read_text(encoding="utf-8")
+          assert "7-Zip\\7z.exe" in workflow
+          assert "steps.compress-artifacts.outcome == 'success'" in workflow
+          print("PASS: 7-Zip production workflow and artifact upload guard present")
+          PY
+
+  archive-roundtrip:
+    name: 20k files / SHA-256 / Unicode / 330+ path / mtime
+    needs: provenance
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - name: Checkout fork-only validation scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          lfs: false
+      - name: Run 20,000-file 7-Zip TAR integrity and timestamp checks
+        shell: pwsh
+        run: |
+          & .\scripts\build\tests\pr20230_archive_verification.ps1 -FileCount 20000 -ExportDirectory (Join-Path (Get-Location).Path 'pr20230-archive-bundle')
+          if ($LASTEXITCODE -ne 0) { throw "TAR verification failed: $LASTEXITCODE" }
+      - name: Upload TAR and source manifest for independent restorer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: PR20230-HEAD-20K-ARCHIVE
+          path: pr20230-archive-bundle/
+          if-no-files-found: error
+          retention-days: 3
+
+  archive-transport:
+    name: Cross-runner TAR restore and independent checksum
+    needs: archive-roundtrip
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Checkout independent restore verifier
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          lfs: false
+      - name: Download TAR bundle from separate runner
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          name: PR20230-HEAD-20K-ARCHIVE
+          path: pr20230-archive-bundle
+      - name: Validate restored file paths SHA-256 and timestamps
+        shell: pwsh
+        run: |
+          & .\scripts\build\tests\pr20230_archive_verification.ps1 -VerifyTransportDirectory (Join-Path (Get-Location).Path 'pr20230-archive-bundle')
+          if ($LASTEXITCODE -ne 0) { throw "Independent TAR restore failed: $LASTEXITCODE" }
+
+  production-script-contracts:
+    name: Current Windows compression / corruption cleanup / upload guard
+    needs: provenance
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Checkout latest actual production workflow
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          lfs: false
+      - name: Run real production PowerShell snippets against isolated fixtures
+        shell: pwsh
+        run: |
+          & .\scripts\build\tests\pr20230_corrupted_cache_verification.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Production cache step contract failed: $LASTEXITCODE" }
+
+  asset-harness-matrix:
+    name: AP harness preflight + 16 simulated states (NOT real AP)
+    needs: provenance
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Checkout AssetProcessor harness and its fake child executable
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          lfs: false
+      - name: Validate PowerShell parser and independent short-path preflight
+        shell: pwsh
+        run: |
+          $file = (Resolve-Path '.\scripts\build\tests\pr20230_asset_processor_recovery.ps1').Path
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -ne 0) {
+            throw "AP harness contains $($parseErrors.Count) PowerShell parsing errors"
+          }
+          & $file -PreflightOnly -EngineSource (Get-Location).Path -WorkRoot (Join-Path $env:RUNNER_TEMP 'p30')
+          if ($LASTEXITCODE -ne 0) { throw "AP preflight failed: $LASTEXITCODE" }
+      - name: Verify simulated AP status reporting and negative controls
+        shell: pwsh
+        run: |
+          & .\scripts\build\tests\pr20230_ap_state_regression.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Simulated AssetProcessor state matrix failed: $LASTEXITCODE" }
+      - name: Preserve machine-readable test-double reports
+        if: always()
+        shell: pwsh
+        run: |
+          $reports = @(Get-ChildItem -LiteralPath $env:RUNNER_TEMP -Filter report.json -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.FullName -like '*pr20230-ap-matrix-*' })
+          $dest = Join-Path (Get-Location).Path 'pr20230-simulated-reports'
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          $i = 0
+          foreach ($report in $reports) {
+            Copy-Item -LiteralPath $report.FullName -Destination (Join-Path $dest ('simulated-case-{0:D2}.json' -f $i))
+            $i++
+          }
+          Write-Host "Collected $i simulated AssetProcessor reports. None are real AP evidence."
+      - name: Upload fake-AP JSON reports (NOT real AP evidence)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: PR20230-HEAD-SIMULATED-AP-REPORTS
+          path: pr20230-simulated-reports/
+          if-no-files-found: warn
+          retention-days: 3
