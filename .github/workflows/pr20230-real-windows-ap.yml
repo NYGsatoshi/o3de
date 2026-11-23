@@ -1,0 +1,163 @@
+# Copyright (c) Contributors to the Open 3D Engine Project.
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Fork-only native Windows test. Never modifies upstream PR #20230.
+name: PR20230 Real Windows Native AP Cache Recovery
+on:
+  push:
+    branches:
+      - test/pr20230-real-windows-native-20261123
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pr20230-real-native-win
+  cancel-in-progress: true
+env:
+  PR_BASE: 9282bcc049561a21989063f1e6449cf0ca54d964
+  LY_PACKAGE_SERVER_URLS: "https://prod.packages.o3debinaries.org;https://dev.packages.o3debinaries.org"
+jobs:
+  windows:
+    name: Compile REAL MSVC AssetProcessor then isolated recovery A-B
+    runs-on: windows-2022
+    timeout-minutes: 230
+    steps:
+      - name: Checkout dedicated fork-only branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          lfs: false
+          fetch-depth: 16
+          show-progress: false
+      - name: Validate production SHA and PowerShell syntax before expensive build
+        shell: pwsh
+        run: |
+          & git cat-file -e ($env:PR_BASE + '^{commit}')
+          if ($LASTEXITCODE -ne 0) { throw 'Missing PR baseline' }
+          & git merge-base --is-ancestor $env:PR_BASE HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Unexpected branch provenance' }
+          foreach ($p in @('.github/workflows/windows-build.yml', 'scripts/build/Platform/Windows/build_config.json', 'scripts/build/Platform/Android/build_config.json')) {
+            $before = (& git rev-parse ('{0}:{1}' -f $env:PR_BASE, $p)).Trim()
+            $after = (& git rev-parse ('HEAD:{0}' -f $p)).Trim()
+            if ($before -cne $after) { throw "Production changed: $p" }
+            Write-Host "PASS: $p unchanged"
+          }
+          $file = (Resolve-Path '.\scripts\build\tests\pr20230_asset_processor_recovery.ps1').Path
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw "PowerShell syntax invalid: $($errors.Count)" }
+          $revision = (& git rev-parse HEAD).Trim()
+          & $file -PreflightOnly -EngineSource (Get-Location).Path -BuildRoot (Join-Path (Get-Location).Path 'build\windows') -WorkRoot (Join-Path $env:RUNNER_TEMP 'p30') -ExpectedEngineCommit $revision
+          if ($LASTEXITCODE -ne 0) { throw "Harness preflight returned $LASTEXITCODE" }
+      - name: Setup upstream 130GB DevDrive
+        uses: samypr100/setup-dev-drive@b9079d2711b01ed39de859c79c96484bfd80e078 # v3.4.1
+        with:
+          drive-size: 130GB
+          drive-format: NTFS
+          drive-path: "D:/dev_drive.vhdx"
+          workspace-copy: true
+          trusted-dev-drive: true
+      - name: Create isolated 3rd-party cache folders
+        shell: pwsh
+        working-directory: "${{ env.DEV_DRIVE_WORKSPACE }}"
+        run: |
+          foreach ($name in @('.o3de', 'build', '3rdParty')) { New-Item -ItemType Directory -Force $name | Out-Null }
+          New-Item -ItemType Directory -Force (Join-Path $env:DEV_DRIVE 'temp') | Out-Null
+          New-Item -ItemType SymbolicLink -Path (Join-Path $env:USERPROFILE '.o3de') -Target (Join-Path $env:DEV_DRIVE_WORKSPACE '.o3de') -Force | Out-Null
+          "LY_3RDPARTY_PATH=$env:DEV_DRIVE_WORKSPACE\3rdParty" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "TEMP=$env:DEV_DRIVE\temp" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=$env:DEV_DRIVE\temp" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Fetch the minimal source LFS inputs
+        shell: pwsh
+        working-directory: "${{ env.DEV_DRIVE_WORKSPACE }}"
+        run: |
+          & git lfs install
+          if ($LASTEXITCODE -ne 0) { throw 'Git LFS setup failed' }
+          & git lfs pull --include "*.ico,*.bmp"
+          if ($LASTEXITCODE -ne 0) { throw 'Git LFS pull failed' }
+      - name: Pin CMake 4.2.3 like upstream AR
+        uses: lukka/get-cmake@f176ccd3f28bda569c43aae4894f06b2435a3375 # v4.2.3
+        with:
+          cmakeVersion: "4.2.3"
+      - name: Install pinned MSVC toolset
+        shell: pwsh
+        run: |
+          $installer = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft Visual Studio\Installer\vs_installer.exe'
+          $vs = Join-Path $env:ProgramFiles 'Microsoft Visual Studio\2022\Enterprise'
+          & $installer modify --installPath $vs --add "Microsoft.VisualStudio.Component.VC.14.44.x86.x64" --quiet --wait
+          if ($LASTEXITCODE -ne 0) { throw "MSVC toolset installation failed: $LASTEXITCODE" }
+      - name: Configure Visual Studio compiler
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
+        with:
+          toolset: "14.44"
+      - name: Bootstrap O3DE bundled Python and register engine
+        shell: pwsh
+        working-directory: "${{ env.DEV_DRIVE_WORKSPACE }}"
+        run: |
+          & .\python\get_python.bat
+          if ($LASTEXITCODE -ne 0) { throw "Python bootstrap failed: $LASTEXITCODE" }
+          & .\scripts\o3de.bat register --this-engine
+          if ($LASTEXITCODE -ne 0) { throw "Engine registration failed: $LASTEXITCODE" }
+      - name: Compile genuine Windows AssetProcessorBatch.exe
+        shell: pwsh
+        working-directory: "${{ env.DEV_DRIVE_WORKSPACE }}"
+        timeout-minutes: 180
+        run: |
+          & cmake -S . -B build\windows -G "Visual Studio 17 2022" -A x64 -T "v143,version=14.44" -DLY_PROJECTS=AutomatedTesting -DCMAKE_SYSTEM_VERSION=10.0
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed: $LASTEXITCODE" }
+          & cmake --build build\windows --target AssetProcessorBatch --config profile --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw "CMake build failed: $LASTEXITCODE" }
+          $exe = Join-Path $env:DEV_DRIVE_WORKSPACE 'build\windows\bin\profile\AssetProcessorBatch.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Real AP binary not built: $exe" }
+          Write-Host "Real native AP SHA256: $((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)"
+      - name: Run native Windows AP cold warm timestamp recovery and negative baseline
+        id: ap
+        shell: pwsh
+        timeout-minutes: 45
+        continue-on-error: true # Capture genuine partial/inconclusive reports, final gate still requires PASS.
+        working-directory: "${{ env.DEV_DRIVE_WORKSPACE }}"
+        run: |
+          $revision = (& git rev-parse HEAD).Trim()
+          $build = Join-Path $env:DEV_DRIVE_WORKSPACE 'build\windows'
+          $work = Join-Path $env:DEV_DRIVE 'p30'
+          & .\scripts\build\tests\pr20230_asset_processor_recovery.ps1 -EngineSource $env:DEV_DRIVE_WORKSPACE -BuildRoot $build -WorkRoot $work -ExpectedEngineCommit $revision -AssetTimeoutSeconds 1200 -MaxJobs 2 -WarmRun -TimestampTruncationProbe -CompareZeroAnalysisBaseline
+          $code = $LASTEXITCODE
+          Write-Host "Real native AP harness exit code: $code"
+          exit $code
+      - name: Collect real AP JSON and text diagnostics only
+        if: always()
+        shell: pwsh
+        run: |
+          $base = Join-Path $env:DEV_DRIVE 'p30'
+          $dest = Join-Path $env:GITHUB_WORKSPACE 'pr20230-win-ap-evidence'
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          if (Test-Path $base) {
+            foreach ($f in @(Get-ChildItem -LiteralPath $base -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.txt', '.json', '.log' -and $_.FullName -match '\\(logs|evidence)\\' })) {
+              $rel = $f.FullName.Substring($base.Length).TrimStart('\')
+              $target = Join-Path $dest $rel
+              New-Item -ItemType Directory -Force (Split-Path $target -Parent) | Out-Null
+              Copy-Item -LiteralPath $f.FullName -Destination $target -Force
+            }
+          }
+          Write-Host "Stored evidence files: $(@(Get-ChildItem $dest -Recurse -File).Count)"
+      - name: Upload native AP report and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: PR20230-REAL-WINDOWS-NATIVE-AP-EVIDENCE
+          path: pr20230-win-ap-evidence/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Require real AP full batch PASS
+        if: always()
+        shell: pwsh
+        run: |
+          $reports = @(Get-ChildItem pr20230-win-ap-evidence -Filter report.json -Recurse -File -ErrorAction SilentlyContinue)
+          $actual = @($reports | Where-Object { (Get-Content -Raw $_.FullName | ConvertFrom-Json).status -ne 'PREFLIGHT_PASS' })
+          if ($actual.Count -ne 1) { throw "Expected exactly one real Windows AP report, got $($actual.Count)" }
+          $report = Get-Content -Raw $actual[0].FullName | ConvertFrom-Json
+          Write-Host "Actual Windows AP status: $($report.status)"
+          Write-Host "Recovery product valid: $($report.sha256_matches)"
+          Write-Host "Negative control differentiates: $($report.zero_analysis_comparison_distinguishes)"
+          Write-Host "Timestamp observation ratio: $($report.timestamp_probe_elapsed_ratio)"
+          if ($report.status -cne 'PASS') { throw "Native AP was $($report.status), not PASS" }
