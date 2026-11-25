@@ -1,0 +1,118 @@
+# Copyright (c) Contributors to the Open 3D Engine Project.
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+name: PR 20231 - Windows parentheses path qualification
+
+on:
+  push:
+    branches:
+      - test/pr20231-windows-parentheses-20261125
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    if: github.repository == 'NYGsatoshi/o3de'
+    runs-on: windows-2022
+    timeout-minutes: 35
+    env:
+      PR_HEAD: c2547607b994c6ed584f891aee1eea30a67ca022
+      PYTHONNOUSERSITE: '1'
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: 'Program Files (x86)/O3DE'
+    steps:
+      - name: Check out the engine under the reported path shape
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: 'Program Files (x86)/O3DE'
+          fetch-depth: 2
+          persist-credentials: false
+          lfs: false
+          sparse-checkout: |
+            cmake
+            python
+            scripts/o3de
+
+      - name: Verify provenance and unchanged product files
+        run: |
+          git rev-parse HEAD
+          git cat-file -e "$env:PR_HEAD^{commit}"
+          if ($LASTEXITCODE -ne 0) { throw 'PR HEAD unavailable' }
+          git diff --exit-code $env:PR_HEAD HEAD -- . ':(exclude).github/workflows/pr20231-windows-parentheses.yml'
+          if ($LASTEXITCODE -ne 0) { throw 'Qualification must not change PR product files' }
+          if ($PWD.Path -notmatch 'Program Files \(x86\)') { throw 'Wrong path shape' }
+          cmake --version
+          if ($LASTEXITCODE -ne 0) { throw 'CMake unavailable' }
+
+      - name: Set up independent test interpreter
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run all three unmodified Windows regression cases
+        run: |
+          python -m pip install pytest==8.4.2
+          if ($LASTEXITCODE -ne 0) { throw 'pytest installation failed' }
+          python -m pytest -v -ra scripts/o3de/tests/test_get_python_windows.py --junitxml="$env:RUNNER_TEMP/pr20231-pytest.xml"
+          if ($LASTEXITCODE -ne 0) { throw 'Regression test failed' }
+          [xml]$report = Get-Content -Raw "$env:RUNNER_TEMP/pr20231-pytest.xml"
+          $suite = $report.testsuites.testsuite
+          if ([int]$suite.tests -ne 3 -or [int]$suite.skipped -ne 0 -or [int]$suite.failures -ne 0 -or [int]$suite.errors -ne 0) {
+            throw 'Expected exactly 3 executed and passing regression tests'
+          }
+
+      - name: Establish an isolated, initially empty O3DE Python profile
+        run: |
+          $profileDir = Join-Path $env:RUNNER_TEMP 'pr20231-o3de-profile'
+          $thirdParty = Join-Path $env:RUNNER_TEMP 'pr20231-3rdparty'
+          if (Test-Path $profileDir) { throw 'Profile already exists' }
+          New-Item -ItemType Directory -Path $profileDir,$thirdParty | Out-Null
+          "USERPROFILE=$profileDir" >> $env:GITHUB_ENV
+          "LY_3RDPARTY_PATH=$thirdParty" >> $env:GITHUB_ENV
+
+      - name: Fresh Python bootstrap with actual CMake, Python and pip
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $preflight = & cmd.exe /d /c 'call python\python.cmd --version' 2>&1
+          $preflightExit = $LASTEXITCODE
+          $preflight | Tee-Object -FilePath "$env:RUNNER_TEMP/pr20231-preflight.log"
+          if ($preflightExit -eq 0) { throw 'Expected a missing O3DE-managed venv before cold start' }
+          if (($preflight | Out-String) -match 'was unexpected at this time') { throw 'Parser error during preflight' }
+          & cmd.exe /d /c 'call python\get_python.bat' 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/pr20231-cold.log"
+          $rc = $LASTEXITCODE
+          $log = Get-Content -Raw "$env:RUNNER_TEMP/pr20231-cold.log"
+          if ($rc -ne 0 -or $log -match 'was unexpected at this time') { throw "Cold bootstrap failed: exit $rc" }
+          if ($log -notmatch 'calling PIP to install requirements' -or $log -notmatch 'calling PIP to O3DE') { throw 'Missing pip phases' }
+          & cmd.exe /d /c 'call python\python.cmd --version'
+          if ($LASTEXITCODE -ne 0) { throw 'O3DE Python unavailable after cold bootstrap' }
+          & cmd.exe /d /c 'call python\python.cmd -m pip show o3de'
+          if ($LASTEXITCODE -ne 0) { throw 'O3DE package not installed' }
+          & cmd.exe /d /c 'call python\python.cmd -c "import o3de; print(o3de.__file__)"'
+          if ($LASTEXITCODE -ne 0) { throw 'O3DE package not importable' }
+
+      - name: Repeat setup with the real existing Python environment
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          & cmd.exe /d /c 'call python\get_python.bat' 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/pr20231-warm.log"
+          $rc = $LASTEXITCODE
+          $log = Get-Content -Raw "$env:RUNNER_TEMP/pr20231-warm.log"
+          if ($rc -ne 0 -or $log -match 'was unexpected at this time') { throw "Warm setup failed: exit $rc" }
+          if ($log -notmatch 'Python is already installed' -or $log -notmatch 'calling PIP to install requirements' -or $log -notmatch 'calling PIP to O3DE') { throw 'Expected existing-Python and pip paths' }
+          & cmd.exe /d /c 'call python\python.cmd -m pip show o3de'
+          if ($LASTEXITCODE -ne 0) { throw 'O3DE package not installed after warm setup' }
+
+      - name: Preserve test and bootstrap evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr20231-windows-parentheses-evidence
+          path: |
+            ${{ runner.temp }}/pr20231-pytest.xml
+            ${{ runner.temp }}/pr20231-preflight.log
+            ${{ runner.temp }}/pr20231-cold.log
+            ${{ runner.temp }}/pr20231-warm.log
+          if-no-files-found: warn
