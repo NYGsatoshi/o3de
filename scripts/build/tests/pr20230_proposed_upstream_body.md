@@ -80,15 +80,16 @@ This enables normal analysis of restored caches and allows missing products to b
 
 **Timestamp metadata observation:** The 7-Zip TAR again reduced subsecond mtimes by `0.1234567`, `0.4567890`, `0.7890123`, and `0.9876543` seconds across the four production cache roots, whereas the tested legacy POSIX-TAR fixture preserved the fractional timestamp (`0.0000000` seconds loss). These measurements demonstrate a precision difference, **not** a proven cache-hit or incremental processing performance regression.
 
-**Artifacts from the 5/5 successful fork run:** `PR20230-HEAD-20K-ARCHIVE` (TAR/source manifest) and `PR20230-HEAD-SIMULATED-AP-REPORTS` (16 fake-AP reports). The three integration and performance checks below remain open.
+**Artifacts from the 5/5 successful fork run:** `PR20230-HEAD-20K-ARCHIVE` (TAR/source manifest) and `PR20230-HEAD-SIMULATED-AP-REPORTS` (16 fake-AP reports). See the November 25 native Windows results and remaining checks below.
 
-- [ ] Obtain a full, successful real AssetProcessorBatch run on the current PR revision in an isolated short-path project and verify the baseline with and without `--zeroAnalysisMode`.
+- [x] Obtain a full, successful real native Windows AssetProcessorBatch run on the current PR revision in an isolated short-path project and verify the baseline with and without `--zeroAnalysisMode` (November 25; evidence below).
 
 **Pending validation**
 
 - [x] Verified through GitHub-hosted Windows CI failure injection that compression failures prevent artifact uploads (the actual production compression code and upload condition were exercised on isolated fixtures).
 - [x] Verified a long-path and file-integrity round-trip on GitHub-hosted Windows runners: Unicode and >330-character paths, source/file counts and SHA-256, including independent-runner GitHub Artifact transport.
-- [ ] Confirm that the reduction in TAR timestamp precision does not introduce cache invalidation or unacceptable rebuild regressions.
+- [x] Compare actual 7-Zip TAR restoration with timestamp-preserving restoration using a controlled native Windows AssetProcessor workload. No additional processing was observed in four pairs (one CopyAsset product, three cache files).
+- [ ] Quantify the impact of timestamp precision and normal analysis on a representative larger workload if required for a general performance-regression claim.
 - [ ] Verify missing-product recovery on Android and compare behavior against a controlled baseline using `--zeroAnalysisMode`.
 
 ### Test limitations
@@ -116,7 +117,7 @@ The Windows CI Asset job did complete successfully.
 
 The [Linux-hosted fork run](https://github.com/NYGsatoshi/o3de/actions/runs/45162604424/job/137651681275) compiled AssetProcessorBatch and ran it against both `android` and `pc` products. In each case normal analysis regenerated the deleted MP4 with the original SHA-256. With `--zeroAnalysisMode` the file stayed missing. Both modes exited 1, so the two reports are **PARTIAL**. The cold runs each recorded 685 failed jobs outside the fixture, including assets still present as Git LFS pointers. The [reports and logs](https://github.com/NYGsatoshi/o3de/actions/runs/45162604424/artifacts/14826138236) were uploaded despite a broken pipe in the final file listing.
 
-The single-product mtime probe recorded 741 processing log lines on each side for both targets. Android took 11.293 s before truncation and 11.244 s after. Linux-hosted `pc` took 11.643 s and 11.895 s. Each pair comes from one run per condition and the probe changed one product's mtime directly. The impact of a complete TAR restore remains open.
+The single-product mtime probe recorded 741 processing log lines on each side for both targets. Android took 11.293 s before truncation and 11.244 s after. Linux-hosted `pc` took 11.643 s and 11.895 s. Each pair comes from one run per condition and the probe changed one product's mtime directly. The November 25 controlled TAR restoration is reported below.
 
 The [native Windows fork job](https://github.com/NYGsatoshi/o3de/actions/runs/45163774257/job/137655422695) configured MSVC, then reached its 180-minute build-step timeout. The AssetProcessor test step was skipped.
 
@@ -124,7 +125,23 @@ The [native Windows fork job](https://github.com/NYGsatoshi/o3de/actions/runs/45
 
 - November 23, `9282bcc`: [Validation](https://github.com/o3de/o3de/actions/runs/45153768060) passed. [AR attempt 2](https://github.com/o3de/o3de/actions/runs/45153767993/attempts/2) passed with 14 successful jobs and two skipped tests (macOS and iOS).
 - The [November 23 Windows Asset job](https://github.com/o3de/o3de/actions/runs/45153767993/job/138025614913) extracted 46,865 files from the 7-Zip TAR and ran AssetProcessor on `AutomatedTesting` for `pc,server`. The scanner assessed 7,373 files and counted zero old timestamps and zero modified dependencies. The batch processed 924 assets successfully, recorded zero failed assets, and took 277.776 s. This is a single production observation without a paired precision-preserving restore.
-- November 25, `e6e62c0bbc14466b7bb54b5c485a25a347f2d4c3`: [Validation](https://github.com/o3de/o3de/actions/runs/45589895613) passed. [AR](https://github.com/o3de/o3de/actions/runs/45589895681) was running at 10:01 UTC. The [dedicated fork branch](https://github.com/NYGsatoshi/o3de/tree/test/pr20230-real-ap-20261125) starts from this PR revision. The [Linux-hosted Android/PC recovery run](https://github.com/NYGsatoshi/o3de/actions/runs/45591465673) and the [native Windows recovery and 7-Zip TAR run](https://github.com/NYGsatoshi/o3de/actions/runs/45591666674) were launched on November 25. Results are pending.
+- November 25, `e6e62c0bbc14466b7bb54b5c485a25a347f2d4c3`: [Validation](https://github.com/o3de/o3de/actions/runs/45589895613) passed. [AR attempt 1](https://github.com/o3de/o3de/actions/runs/45589895681/attempts/1) ended with 13 successful jobs, 1 failed job and 2 skipped tests (macOS/iOS). The Windows-Test job failed in `Build test_cpu_profile`: `UdpTransportTests.FragmentTimeoutReleasesHighSequenceBeforeReuse` at `UdpTransportTests.cpp:160` returned dispatch result 0 instead of expected 2 (Success); 136/137 CTest entries passed. [Failure log](https://github.com/o3de/o3de/actions/runs/45589895681/job/139150621780). The PR changes no AzNetworking source or test files; causation has not been established. A failed-job rerun is needed; the GitHub integration was denied permission (403). [Previous Windows-Test run](https://github.com/o3de/o3de/actions/runs/45153767993/job/138025616397) on the November 23 revision passed 137/137 CTest entries.
+- November 25 [Windows-Asset](https://github.com/o3de/o3de/actions/runs/45589895681/job/139135293566) passed. 7-Zip extracted 47,244 files; AssetProcessor assessed 7,373 files, reported zero old timestamps and zero modified dependencies, processed 929 assets successfully, failed 0, reported 177 warnings and 8 errors, and took 281.709991 s (AutomatedTesting, pc/server). This is a production observation, not a paired comparison.
+- November 25 [Android-Asset](https://github.com/o3de/o3de/actions/runs/45589895681/job/139129982872) passed. It assessed 7,360 files, processed 473 assets successfully, failed 0, reported 89 warnings and 4 errors, and took 68.819 s. This is ordinary asset processing, not deliberate product deletion/recovery.
+- [Linux-hosted Android/PC recovery](https://github.com/NYGsatoshi/o3de/actions/runs/45591465673) remains in progress (compiling AssetProcessorBatch).
+
+**November 25 native Windows controlled recovery and TAR comparison (exact PR HEAD `e6e62c0bbc14466b7bb54b5c485a25a347f2d4c3`)**
+
+[Run #45591666674](https://github.com/NYGsatoshi/o3de/actions/runs/45591666674) — SUCCESS, verification commit `447c64b8939d617f4b17bcc7d7dbefbed2d4568d`. Downloaded and inspected the actual [report.json and 20 AP logs](https://github.com/NYGsatoshi/o3de/actions/runs/45591666674/artifacts/15019073289). The archive SHA-256 matches the upload log (`b8f34c075617bde235dcf29760873e181a634c3683cb14825b3fdb0735190e8f`). The report identifies the exact engine checkout and native binary SHA-256 `974e516bfbf07050fb8a6fbc7a9c363198536c3eb90987869d1f73aaf2dceafd`.
+
+- All 20 real AP invocations exited 0, with zero failed assets, zero reported errors and complete batch markers.
+- Cold run processed 1 asset; warm run processed 0. After restoring the same closed database/cache snapshot and deleting the product, normal analysis detected the missing product and processed 1 asset. The original and regenerated product SHA-256 both equal `5e653425a26ecc30a307510e528c810f1313405ee81809fa03240976357e2693`. The same deletion with `--zeroAnalysisMode` processed 0 assets and left the product absent.
+- Four alternating intact-cache trials per mode: normal median 0.552058 s; zero-analysis median 0.547894 s; difference +0.004164 s. One CopyAsset product, same paths and snapshot.
+- Four alternating timestamp-preserving vs real 7-Zip TAR restore pairs: all 3 cache files matched path/content; all 3 TAR files lost fractional timestamps, maximum loss 0.9876543 s. Both arms processed 0 assets in all four pairs, and the product hash matched in each run. Additional processed assets per pair: [0, 0, 0, 0].
+- AP-only median times: precision-preserving control 0.6050655 s; TAR 0.5474695 s; median of paired TAR-minus-control differences -0.0076205 s. The timing excludes archive preparation and extraction. These results establish no extra processing in this isolated workload; they do not establish a performance improvement or a general large-project guarantee.
+
+- [x] Current HEAD Validation passed.
+- [ ] Current HEAD full AR passed (attempt 1 failed; rerun pending).
 
 **Historical upstream CI status (previous PR HEAD `671e439`, October 29, 2026)**
 
@@ -144,11 +161,11 @@ Additional manifest or hash verification would provide stronger protection again
 
 **Timestamp compatibility**
 
-7-Zip TAR archives may preserve timestamps at a different precision from the previous POSIX TAR writer. The impact on cache hit rates and incremental processing has not been quantified.
+7-Zip TAR truncates fractional timestamps in the tested fixtures. The November 25 controlled Windows comparison found no extra processing for one CopyAsset product and three cache files; representative large-project impact is not established.
 
 **AssetProcessor performance**
 
-Removing `--zeroAnalysisMode` may increase analysis time. A controlled performance comparison is still pending.
+Removing `--zeroAnalysisMode` may increase analysis time. The controlled one-product comparison measured +0.004164 s in median intact-cache AP time; larger workload performance is not established.
 
 ### References
 
