@@ -1,0 +1,106 @@
+# Copyright (c) Contributors to the Open 3D Engine Project.
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+name: PR20230 Linux-hosted AssetProcessor recovery
+
+on:
+  push:
+    branches: [test/pr20230-real-ap-20261125]
+    paths:
+      - .github/workflows/pr20230-linux-ap.yml
+      - scripts/build/tests/pr20230_real_ap_recovery.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PR_REVISION: e6e62c0bbc14466b7bb54b5c485a25a347f2d4c3
+  LY_PACKAGE_SERVER_URLS: "https://prod.packages.o3debinaries.org;https://dev.packages.o3debinaries.org"
+  LY_MIN_MEMORY_PER_CORE: "2097152"
+  QT_QPA_PLATFORM: offscreen
+
+jobs:
+  recovery:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    steps:
+      - name: Check available disk space
+        id: disk
+        run: |
+          avail=$(df -BG --output=avail "$GITHUB_WORKSPACE" | tail -1 | tr -d ' G')
+          if (( avail < 70 )); then echo 'expand=true' >> "$GITHUB_OUTPUT"; fi
+
+      - name: Expand workspace
+        if: steps.disk.outputs.expand == 'true'
+        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c
+        with:
+          root-reserve-mb: 8000
+          swap-size-mb: 512
+          remove-dotnet: true
+          remove-haskell: true
+          remove-codeql: true
+          remove-docker-images: true
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 20
+          show-progress: false
+
+      - name: Verify engine revision and probe syntax
+        run: |
+          git merge-base --is-ancestor "$PR_REVISION" HEAD
+          git diff --exit-code "$PR_REVISION" HEAD -- . ':!.github/workflows/pr20230-*.yml' ':!scripts/build/tests/pr20230_*'
+          python3 -m py_compile scripts/build/tests/pr20230_real_ap_recovery.py
+          mkdir -p evidence
+          git rev-parse HEAD "$PR_REVISION" > evidence/revisions.txt
+
+      - uses: lukka/get-cmake@f176ccd3f28bda569c43aae4894f06b2435a3375
+        with:
+          cmakeVersion: "4.2.3"
+          ninjaVersion: "1.13.2"
+
+      - name: Install Linux host build and runtime dependencies
+        run: |
+          git lfs pull --include='*.ico,*.bmp'
+          pkglist=scripts/build/build_node/Platform/Linux/package-list.ubuntu-jammy.txt
+          # The isolated copy builder runs on the Linux host and uses no Android SDK or JDK.
+          mapfile -t packages < <(awk 'NF && $1 !~ /^#/ && $1 != "java-11-amazon-corretto-jdk" {print $1}' "$pkglist")
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${packages[@]}"
+          mkdir -p "$GITHUB_WORKSPACE/3rdParty"
+          echo "LY_3RDPARTY_PATH=$GITHUB_WORKSPACE/3rdParty" >> "$GITHUB_ENV"
+          ./python/get_python.sh
+          ./scripts/o3de.sh register --this-engine
+
+      - name: Build AssetProcessorBatch and its runtime dependencies
+        id: build
+        timeout-minutes: 285
+        run: |
+          cmake -S . -B build/linux -G 'Ninja Multi-Config' -DLY_PROJECTS=AutomatedTesting
+          cmake --build build/linux --target AssetProcessorBatch --config profile --parallel 3
+          sha256sum build/linux/bin/profile/AssetProcessorBatch > evidence/binary.sha256
+          cat evidence/binary.sha256
+
+      - name: Recover an Android product and compare normal and zero analysis
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          python3 scripts/build/tests/pr20230_real_ap_recovery.py \
+            --engine-source . --build-root build/linux --platform android \
+            --work-root /tmp/p30 --output evidence/android
+
+      - name: Repeat the recovery and comparison for a PC product on the Linux host
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          python3 scripts/build/tests/pr20230_real_ap_recovery.py \
+            --engine-source . --build-root build/linux --platform pc \
+            --work-root /tmp/p30 --output evidence/pc
+
+      - name: Upload reports and AP stdout for both targets
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr20230-linux-host-recovery-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
