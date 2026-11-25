@@ -1,0 +1,134 @@
+# Copyright (c) Contributors to the Open 3D Engine Project.
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+name: PR20230 Windows native recovery and 7-Zip TAR
+on:
+  push:
+    branches: [test/pr20230-real-ap-20261125]
+    paths:
+      - .github/workflows/pr20230-win-ap.yml
+      - scripts/build/tests/pr20230_real_ap_recovery.py
+      - scripts/build/tests/pr20230_archive_probe.py
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pr20230-win-ap-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  PR_HEAD: e6e62c0bbc14466b7bb54b5c485a25a347f2d4c3
+  LY_PACKAGE_SERVER_URLS: https://prod.packages.o3debinaries.org;https://dev.packages.o3debinaries.org
+jobs:
+  windows:
+    if: github.repository == 'NYGsatoshi/o3de'
+    runs-on: windows-2022
+    timeout-minutes: 355
+    steps:
+      - name: Checkout verification scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: checks
+          sparse-checkout: scripts/build/tests
+          persist-credentials: false
+
+      - name: Checkout the exact PR source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: NYGsatoshi/o3de
+          ref: ${{ env.PR_HEAD }}
+          path: src
+          show-progress: false
+          persist-credentials: false
+
+      - name: Prepare workspace disk
+        uses: samypr100/setup-dev-drive@b9079d2711b01ed39de859c79c96484bfd80e078
+        with:
+          drive-size: 130GB
+          drive-format: NTFS
+          drive-path: D:/dev_drive.vhdx
+          workspace-copy: true
+          trusted-dev-drive: true
+
+      - name: Set short paths and confirm revisions
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        shell: pwsh
+        run: |
+          $engine = (Resolve-Path src).Path
+          $scripts = (Resolve-Path checks/scripts/build/tests).Path
+          $head = git -C src rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:PR_HEAD) { throw "Unexpected engine commit $head" }
+          $checks = git -C checks rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $checks -cne $env:GITHUB_SHA) { throw "Unexpected test commit $checks" }
+          $driveRoot = [IO.Path]::GetPathRoot($engine)
+          $dirs = @{
+            ENGINE = $engine
+            SCRIPTS = $scripts
+            BUILD = (Join-Path $driveRoot b)
+            PROBE = (Join-Path $driveRoot p30)
+            LY_3RDPARTY_PATH = (Join-Path $driveRoot thirdparty)
+            TEMP = (Join-Path $driveRoot tmp)
+            TMP = (Join-Path $driveRoot tmp)
+          }
+          foreach ($key in $dirs.Keys) {
+            New-Item -ItemType Directory -Force -Path $dirs[$key] | Out-Null
+            "$key=$($dirs[$key])" >> $env:GITHUB_ENV
+          }
+          Write-Output "Engine $head; verification scripts $checks"
+          git -C src lfs pull --include="*.ico,*.bmp"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to fetch Windows build inputs" }
+
+      - name: Set upstream CMake version
+        uses: lukka/get-cmake@f176ccd3f28bda569c43aae4894f06b2435a3375
+        with:
+          cmakeVersion: 4.2.3
+
+      - name: Ensure pinned MSVC toolset is installed
+        shell: pwsh
+        run: |
+          $installerDir = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
+          $vs = & (Join-Path $installerDir vswhere.exe) -latest -products '*' -version '[17.0,18.0)' -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw "Visual Studio 2022 was not found" }
+          $compiler = Join-Path $vs 'VC\Tools\MSVC\14.44*\bin\Hostx64\x64\cl.exe'
+          if (-not (Test-Path $compiler)) {
+            $install = Start-Process (Join-Path $installerDir setup.exe) -ArgumentList ('modify --installPath "{0}" --add Microsoft.VisualStudio.Component.VC.14.44.x86.x64 --quiet --norestart' -f $vs) -Wait -PassThru
+            if ($install.ExitCode -notin 0,3010 -or -not (Test-Path $compiler)) { throw "MSVC 14.44 installation failed ($($install.ExitCode))" }
+          }
+
+      - name: Initialize native compiler
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
+        with:
+          toolset: "14.44"
+
+      - name: Register pinned engine
+        working-directory: ${{ env.ENGINE }}
+        shell: pwsh
+        run: |
+          & .\python\get_python.bat
+          if ($LASTEXITCODE -ne 0) { throw "O3DE Python bootstrap failed" }
+          & .\scripts\o3de.bat register --this-engine
+          if ($LASTEXITCODE -ne 0) { throw "Engine registration failed" }
+
+      - name: Compile the native AssetProcessorBatch target
+        shell: pwsh
+        timeout-minutes: 300
+        run: |
+          & cmake -S $env:ENGINE -B $env:BUILD -G "Visual Studio 17 2022" -A x64 -T "v143,version=14.44" "-DLY_PROJECTS=" "-DCMAKE_SYSTEM_VERSION=10.0"
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
+          & cmake --build $env:BUILD --target AssetProcessorBatch --config profile --parallel 3
+          if ($LASTEXITCODE -ne 0) { throw "Native compilation failed" }
+          Get-FileHash (Join-Path $env:BUILD "bin/profile/AssetProcessorBatch.exe") -Algorithm SHA256
+
+      - name: Run cold, warm, recovery, zero-analysis and archive comparisons
+        timeout-minutes: 40
+        shell: pwsh
+        run: |
+          python (Join-Path $env:SCRIPTS 'pr20230_real_ap_recovery.py') --engine-source $env:ENGINE --build-root $env:BUILD --work-root $env:PROBE --platform pc --archive-probe --output (Join-Path $env:GITHUB_WORKSPACE evidence/windows)
+          exit $LASTEXITCODE
+
+      - name: Upload reports and per-process output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: PR20230-windows-native-${{ github.run_attempt }}
+          path: evidence/windows/
+          if-no-files-found: warn
+          retention-days: 14
