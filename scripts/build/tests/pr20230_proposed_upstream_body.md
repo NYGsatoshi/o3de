@@ -90,7 +90,7 @@ This enables normal analysis of restored caches and allows missing products to b
 - [x] Verified a long-path and file-integrity round-trip on GitHub-hosted Windows runners: Unicode and >330-character paths, source/file counts and SHA-256, including independent-runner GitHub Artifact transport.
 - [x] Compare actual 7-Zip TAR restoration with timestamp-preserving restoration using a controlled native Windows AssetProcessor workload. No additional processing was observed in four pairs (one CopyAsset product, three cache files).
 - [ ] Quantify the impact of timestamp precision and normal analysis on a representative larger workload if required for a general performance-regression claim.
-- [ ] Verify missing-product recovery on Android and compare behavior against a controlled baseline using `--zeroAnalysisMode`.
+- [x] Verify missing-product recovery on Android and compare behavior against a controlled baseline using `--zeroAnalysisMode` (November 25; Linux-hosted real AP, both Android and PC targets).
 
 ### Test limitations
 
@@ -128,7 +128,7 @@ The [native Windows fork job](https://github.com/NYGsatoshi/o3de/actions/runs/45
 - November 25, `e6e62c0bbc14466b7bb54b5c485a25a347f2d4c3`: [Validation](https://github.com/o3de/o3de/actions/runs/45589895613) passed. [AR attempt 1](https://github.com/o3de/o3de/actions/runs/45589895681/attempts/1) ended with 13 successful jobs, 1 failed job and 2 skipped tests (macOS/iOS). The Windows-Test job failed in `Build test_cpu_profile`: `UdpTransportTests.FragmentTimeoutReleasesHighSequenceBeforeReuse` at `UdpTransportTests.cpp:160` returned dispatch result 0 instead of expected 2 (Success); 136/137 CTest entries passed. [Failure log](https://github.com/o3de/o3de/actions/runs/45589895681/job/139150621780). The PR changes no AzNetworking source or test files; causation has not been established. A failed-job rerun is needed; the GitHub integration was denied permission (403). [Previous Windows-Test run](https://github.com/o3de/o3de/actions/runs/45153767993/job/138025616397) on the November 23 revision passed 137/137 CTest entries.
 - November 25 [Windows-Asset](https://github.com/o3de/o3de/actions/runs/45589895681/job/139135293566) passed. 7-Zip extracted 47,244 files; AssetProcessor assessed 7,373 files, reported zero old timestamps and zero modified dependencies, processed 929 assets successfully, failed 0, reported 177 warnings and 8 errors, and took 281.709991 s (AutomatedTesting, pc/server). This is a production observation, not a paired comparison.
 - November 25 [Android-Asset](https://github.com/o3de/o3de/actions/runs/45589895681/job/139129982872) passed. It assessed 7,360 files, processed 473 assets successfully, failed 0, reported 89 warnings and 4 errors, and took 68.819 s. This is ordinary asset processing, not deliberate product deletion/recovery.
-- [Linux-hosted Android/PC recovery](https://github.com/NYGsatoshi/o3de/actions/runs/45591465673) remains in progress (compiling AssetProcessorBatch).
+- [Linux-hosted Android/PC recovery](https://github.com/NYGsatoshi/o3de/actions/runs/45591465673) passed for both targets; detailed results below.
 
 **November 25 native Windows controlled recovery and TAR comparison (exact PR HEAD `e6e62c0bbc14466b7bb54b5c485a25a347f2d4c3`)**
 
@@ -139,6 +139,17 @@ The [native Windows fork job](https://github.com/NYGsatoshi/o3de/actions/runs/45
 - Four alternating intact-cache trials per mode: normal median 0.552058 s; zero-analysis median 0.547894 s; difference +0.004164 s. One CopyAsset product, same paths and snapshot.
 - Four alternating timestamp-preserving vs real 7-Zip TAR restore pairs: all 3 cache files matched path/content; all 3 TAR files lost fractional timestamps, maximum loss 0.9876543 s. Both arms processed 0 assets in all four pairs, and the product hash matched in each run. Additional processed assets per pair: [0, 0, 0, 0].
 - AP-only median times: precision-preserving control 0.6050655 s; TAR 0.5474695 s; median of paired TAR-minus-control differences -0.0076205 s. The timing excludes archive preparation and extraction. These results establish no extra processing in this isolated workload; they do not establish a performance improvement or a general large-project guarantee.
+
+**November 25 Linux-hosted Android and PC controlled recovery (PR HEAD `e6e62c0bbc14466b7bb54b5c485a25a347f2d4c3`)**
+
+[Run #45591465673](https://github.com/NYGsatoshi/o3de/actions/runs/45591465673) — SUCCESS, verification commit `c9157b1f264cdce469555fc572e9e95e03ceb2bb`. The workflow passed the engine revision/diff and syntax checks. Downloaded the [actual reports and AP logs](https://github.com/NYGsatoshi/o3de/actions/runs/45591465673/artifacts/15023404644). ZIP SHA-256 `7420c4031e455f3fbee6be805bc9c33e7cc6a05b43b519a905a931acccd17ace` matches the upload log; ZIP CRC validation passed. The recorded binary SHA-256 is `cba4b0b394e14025bd41d4619a74d6d2215b0890921e60ec07c71bf844a66773`. The revision manifest records both the verification commit and exact PR HEAD.
+
+- Android and PC each passed 12 actual AssetProcessorBatch invocations (24 total), all exit 0, zero failed assets, zero reported errors and complete batch markers. All counters in the JSON reports were independently cross-checked against the 24 AP stdout logs.
+- Each target processed 1 asset cold and 0 warm. Starting with the same closed cache/database snapshot and deleting the product, normal analysis detected and regenerated 1 product; the original and regenerated SHA-256 both equal `5e653425a26ecc30a307510e528c810f1313405ee81809fa03240976357e2693`. The zero-analysis arm processed 0 assets and left the deleted product absent for both targets.
+- Four alternating intact-cache trials per mode per target: Android normal median 0.540156 s vs zero 0.5401915 s; PC normal median 0.565323 s vs zero 0.5654225 s. Both modes processed 0 assets throughout. The tiny median differences are not evidence of a performance improvement.
+- Scope: one isolated CopyAsset product per target using the real Linux-hosted AP with Android and PC target flags; this is not an Android-device runtime test or a representative large-project benchmark.
+
+Together with native Windows, all 44 controlled real AP invocations completed successfully. The upstream AR remains a separate required gate.
 
 - [x] Current HEAD Validation passed.
 - [ ] Current HEAD full AR passed (attempt 1 failed; rerun pending).
