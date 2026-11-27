@@ -8,6 +8,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
   focused-tests:
     strategy:
@@ -28,7 +29,7 @@ jobs:
       - name: Check syntax
         run: python -m compileall -q Tools/LyTestTools/ly_test_tools/o3de Tools/LyTestTools/tests/unit/test_o3de_multi_test_framework.py
       - name: Run focused unit tests
-        run: python -m pytest -q Tools/LyTestTools/tests/unit/test_editor_test_utils.py Tools/LyTestTools/tests/unit/test_o3de_multi_test_framework.py Tools/LyTestTools/tests/unit/test_o3de_editor_test.py Tools/LyTestTools/tests/unit/test_o3de_atom_tools_test.py
+        run: python -m pytest -c pytest.ini -q Tools/LyTestTools/tests/unit/test_editor_test_utils.py Tools/LyTestTools/tests/unit/test_o3de_multi_test_framework.py Tools/LyTestTools/tests/unit/test_o3de_editor_test.py Tools/LyTestTools/tests/unit/test_o3de_atom_tools_test.py
   bundled-python:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
@@ -39,6 +40,47 @@ jobs:
       - name: Bootstrap O3DE Python
         run: bash python/get_python.sh
       - name: Install LyTestTools
-        run: bash python/pip.sh install --no-deps -e Tools/LyTestTools
+        run: bash python/pip.sh install --no-deps -e "$GITHUB_WORKSPACE/Tools/LyTestTools"
       - name: Run focused tests under O3DE Python
-        run: bash python/python.sh -m pytest -q Tools/LyTestTools/tests/unit/test_editor_test_utils.py Tools/LyTestTools/tests/unit/test_o3de_multi_test_framework.py Tools/LyTestTools/tests/unit/test_o3de_editor_test.py Tools/LyTestTools/tests/unit/test_o3de_atom_tools_test.py
+        run: bash python/python.sh -m pytest -c pytest.ini -q Tools/LyTestTools/tests/unit/test_editor_test_utils.py Tools/LyTestTools/tests/unit/test_o3de_multi_test_framework.py Tools/LyTestTools/tests/unit/test_o3de_editor_test.py Tools/LyTestTools/tests/unit/test_o3de_atom_tools_test.py
+
+  Linux-Profile:
+    needs: [focused-tests, bundled-python]
+    uses: ./.github/workflows/linux-build.yml
+    with:
+      compiler: clang
+      config: profile
+      image: ubuntu-22.04
+      platform: Linux
+      type: profile
+      last_artifact: false
+      clang_version: "18"
+      gcc_version: "13"
+      cmake_version: "4.2.3"
+
+  Linux-Asset:
+    needs: Linux-Profile
+    uses: ./.github/workflows/linux-build.yml
+    with:
+      compiler: clang
+      config: profile
+      image: ubuntu-22.04
+      platform: Linux
+      type: asset_profile
+      clang_version: "18"
+      gcc_version: "13"
+      cmake_version: "4.2.3"
+
+  Linux-Test:
+    needs: Linux-Asset
+    uses: ./.github/workflows/linux-build.yml
+    with:
+      compiler: clang
+      config: profile
+      image: ubuntu-22.04
+      platform: Linux
+      type: test_profile
+      desktop: true
+      clang_version: "18"
+      gcc_version: "13"
+      cmake_version: "4.2.3"
